@@ -3,17 +3,33 @@ import re
 import requests
 import logging
 import math
+import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "7227182736:AAHs6widEwBl6AJUebqaA_-z7x6XACi39BE"
-GEO_API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImI0ZTcxNDQ2ZjU4ZjQwNDY5NDM4OTIyNGZjMjQzZWRmIiwiaCI6Im11cm11cjY0In0="
 
-with open('flats_data.json', 'r', encoding='utf-8') as f:
-    FLATS = json.load(f)
+# Получаем путь к файлу flats_data.json
+current_dir = os.path.dirname(os.path.abspath(__file__))
+json_path = os.path.join(current_dir, 'flats_data.json')
 
+# Загрузка данных
+try:
+    with open(json_path, 'r', encoding='utf-8') as f:
+        FLATS = json.load(f)
+    logger.info(f"✅ Загружено {len(FLATS)} квартир из {json_path}")
+except FileNotFoundError:
+    logger.error(f"❌ Файл не найден: {json_path}")
+    FLATS = []
+except json.JSONDecodeError as e:
+    logger.error(f"❌ Ошибка парсинга JSON: {e}")
+    FLATS = []
+
+# Координаты районов
 DISTRICT_COORDS = {
     'Заводской': (53.85, 27.60), 'Московский': (53.88, 27.53),
     'Октябрьский': (53.85, 27.55), 'Первомайский': (53.92, 27.62),
@@ -39,8 +55,8 @@ def find_nearby_pois(lat, lon, radius=800):
         r = requests.post("https://overpass-api.de/api/interpreter", data=query, timeout=30)
         if r.status_code == 200:
             return parse_poi(r.json(), lat, lon)
-    except:
-        pass
+    except Exception as e:
+        logger.warning(f"POI API error: {e}")
     return {}
 
 def parse_poi(data, lat, lon):
@@ -123,12 +139,17 @@ async def all_flats(update: Update, context):
         msg += f"{i}. *{f['rooms']}к*, {f['price_usd']}$\n📍 {f['address'][:45]}\n🔗 [Смотреть]({f['url']})\n\n"
     await update.message.reply_text(msg, parse_mode="Markdown", disable_web_page_preview=True)
 
+async def error_handler(update, context):
+    logger.error(f"Ошибка: {context.error}")
+
 def main():
+    logger.info("🚀 Запуск бота...")
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("all", all_flats))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search))
-    print(f"✅ Бот запущен! В базе {len(FLATS)} квартир")
+    app.add_error_handler(error_handler)
+    logger.info(f"✅ Бот запущен! В базе {len(FLATS)} квартир")
     app.run_polling()
 
 if __name__ == "__main__":

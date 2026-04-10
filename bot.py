@@ -1,53 +1,12 @@
-import os
-import signal
-import subprocess
-import sys
-import time
 import json
 import re
 import requests
 import logging
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from geopy.distance import distance
 from functools import lru_cache
-
-# ===== БЕЗОПАСНАЯ ОСТАНОВКА СТАРЫХ ЭКЗЕМПЛЯРОВ (ДЛЯ RENDER) =====
-def stop_old_bots():
-    """Останавливает только старые процессы, не трогая текущий"""
-    try:
-        current_pid = os.getpid()
-        print(f"📌 Текущий PID: {current_pid}")
-        
-        # Используем ps с правильными параметрами для Render
-        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
-        
-        killed = 0
-        for line in result.stdout.split('\n'):
-            if 'bot.py' in line and 'python' in line and 'grep' not in line:
-                parts = line.split()
-                if len(parts) > 1:
-                    try:
-                        pid = int(parts[1])
-                        if pid != current_pid and pid != 0:
-                            print(f"🔪 Останавливаем старый процесс PID: {pid}")
-                            os.kill(pid, signal.SIGTERM)
-                            killed += 1
-                            time.sleep(0.3)
-                    except (ValueError, ProcessLookupError, OSError):
-                        pass
-        
-        if killed > 0:
-            print(f"✅ Остановлено {killed} старых процессов")
-        else:
-            print("✅ Нет старых процессов для остановки")
-            
-    except Exception as e:
-        print(f"⚠️ Ошибка при остановке: {e}")
-
-# Вызываем остановку старых процессов
-stop_old_bots()
-# ========================================
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -55,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "7227182736:AAHs6widEwBl6AJUebqaA_-z7x6XACi39BE"
 
-# Координаты станций метро
+# Координаты станций метро Минска
 METRO_STATIONS = {
     'Немига': (53.9065, 27.5550), 'Купаловская': (53.9075, 27.5620),
     'Октябрьская': (53.9000, 27.5600), 'Площадь Ленина': (53.8960, 27.5510),
@@ -164,16 +123,6 @@ def calculate_distance_meters(lat1, lon1, lat2, lon2):
 def get_infrastructure_by_district(district):
     return DISTRICT_INFRA.get(district, DISTRICT_INFRA.get('Центральный', {}))
 
-def get_metro_distance_from_coords(lat, lon):
-    min_dist = 999999
-    nearest = None
-    for station, coord in METRO_STATIONS.items():
-        dist = calculate_distance_meters(lat, lon, coord[0], coord[1])
-        if dist < min_dist:
-            min_dist = dist
-            nearest = station
-    return nearest, min_dist
-
 def extract_user_needs(text):
     text_lower = text.lower()
     needs = {'rooms': None, 'max_price': None, 'floor': None, 'metro_station': None}
@@ -277,7 +226,6 @@ async def search_flats(update: Update, context):
     top = scored[:5]
     
     context.user_data['last_results'] = top
-    context.user_data['last_results_full'] = top
     
     msg = f"🔍 *Варианты 1-{min(3, len(top))} из {len(top)}:*\n\n"
     for i, (flat, analysis) in enumerate(top[:3], 1):
@@ -363,14 +311,13 @@ async def handle_question(update: Update, context):
         return
     
     text = update.message.text.lower()
-    results = context.user_data.get('last_results_full', [])
+    results = context.user_data.get('last_results', [])
     
     if not results:
         await update.message.reply_text("Сначала выполните поиск квартир.")
         context.user_data['waiting_for_question'] = False
         return
     
-    # Определяем номер варианта
     flat_index = 0
     if 'перв' in text or '1' in text:
         flat_index = 0
@@ -445,15 +392,7 @@ async def handle_question(update: Update, context):
         if infra.get('metro'):
             response += "🚇 *Метро рядом:*\n" + "\n".join([f"• {m['name']} — {m['distance']} м" for m in infra['metro'][:3]])
         else:
-            lat, lon = analysis.get('lat'), analysis.get('lon')
-            if lat and lon:
-                nearest, dist = get_metro_distance_from_coords(lat, lon)
-                if nearest:
-                    response += f"🚇 *Ближайшее метро:* {nearest} — {dist} м"
-                else:
-                    response += "🚇 Метро в районе не найдено."
-            else:
-                response += "🚇 Метро в районе не найдено."
+            response += "🚇 Метро в районе не найдено."
     
     else:
         response += "Я могу ответить на вопросы о:\n• инфраструктуре района\n• магазинах и ТЦ\n• кафе\n• парках\n• школах и детских садах\n• аптеках\n• метро"

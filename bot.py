@@ -12,26 +12,44 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from geopy.distance import distance
 from functools import lru_cache
 
-# ===== БЕЗОПАСНАЯ ОСТАНОВКА СТАРЫХ ЭКЗЕМПЛЯРОВ =====
+# ===== БЕЗОПАСНАЯ ОСТАНОВКА СТАРЫХ ЭКЗЕМПЛЯРОВ (ДЛЯ RENDER) =====
 def stop_old_bots():
+    """Останавливает только старые процессы, не трогая текущий"""
     try:
         current_pid = os.getpid()
-        result = subprocess.run(['pgrep', '-f', 'python.*bot.py'], capture_output=True, text=True)
-        for pid_str in result.stdout.strip().split():
-            if pid_str:
-                try:
-                    pid = int(pid_str)
-                    if pid != current_pid:
-                        os.kill(pid, signal.SIGTERM)
-                        time.sleep(0.5)
-                except:
-                    pass
-    except:
-        pass
+        print(f"📌 Текущий PID: {current_pid}")
+        
+        # Используем ps с правильными параметрами для Render
+        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
+        
+        killed = 0
+        for line in result.stdout.split('\n'):
+            if 'bot.py' in line and 'python' in line and 'grep' not in line:
+                parts = line.split()
+                if len(parts) > 1:
+                    try:
+                        pid = int(parts[1])
+                        if pid != current_pid and pid != 0:
+                            print(f"🔪 Останавливаем старый процесс PID: {pid}")
+                            os.kill(pid, signal.SIGTERM)
+                            killed += 1
+                            time.sleep(0.3)
+                    except (ValueError, ProcessLookupError, OSError):
+                        pass
+        
+        if killed > 0:
+            print(f"✅ Остановлено {killed} старых процессов")
+        else:
+            print("✅ Нет старых процессов для остановки")
+            
+    except Exception as e:
+        print(f"⚠️ Ошибка при остановке: {e}")
 
+# Вызываем остановку старых процессов
 stop_old_bots()
 # ========================================
 
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -51,77 +69,77 @@ METRO_STATIONS = {
     'Площадь Победы': (53.9100, 27.5750), 'Вокзальная': (53.8900, 27.5490)
 }
 
-# ===== РЕЗЕРВНЫЕ ДАННЫЕ ПО РАЙОНАМ =====
+# Резервные данные по районам
 DISTRICT_INFRA = {
     'Партизанский': {
-        'shops': [{'name': 'Евроопт', 'distance': 350}, {'name': 'Корона', 'distance': 600}, {'name': 'Соседи', 'distance': 800}],
-        'cafes': [{'name': 'Кафе "Уют"', 'distance': 400}, {'name': 'Кофе Хауз', 'distance': 650}],
-        'parks': [{'name': 'Парк им. Челюскинцев', 'distance': 1200}, {'name': 'Ботанический сад', 'distance': 2000}],
-        'schools': [{'name': 'СШ №45', 'distance': 500}, {'name': 'Гимназия №5', 'distance': 700}],
-        'kindergartens': [{'name': 'Детский сад №156', 'distance': 300}, {'name': 'Детский сад №98', 'distance': 550}],
-        'pharmacies': [{'name': 'Аптека №1', 'distance': 250}, {'name': 'Аптека БФ', 'distance': 450}],
+        'shops': [{'name': 'Евроопт', 'distance': 350}, {'name': 'Корона', 'distance': 600}],
+        'cafes': [{'name': 'Кафе "Уют"', 'distance': 400}],
+        'parks': [{'name': 'Парк им. Челюскинцев', 'distance': 1200}],
+        'schools': [{'name': 'СШ №45', 'distance': 500}],
+        'kindergartens': [{'name': 'Детский сад №156', 'distance': 300}],
+        'pharmacies': [{'name': 'Аптека №1', 'distance': 250}],
         'metro': [{'name': 'Партизанская', 'distance': 1500}]
     },
     'Заводской': {
-        'shops': [{'name': 'Алми', 'distance': 400}, {'name': 'Соседи', 'distance': 700}, {'name': 'Евроопт', 'distance': 900}],
-        'cafes': [{'name': 'Кофе Хауз', 'distance': 500}, {'name': 'Кафе "Встреча"', 'distance': 750}],
+        'shops': [{'name': 'Алми', 'distance': 400}, {'name': 'Соседи', 'distance': 700}],
+        'cafes': [{'name': 'Кофе Хауз', 'distance': 500}],
         'parks': [{'name': 'Парк 50-летия Октября', 'distance': 1500}],
-        'schools': [{'name': 'Гимназия №12', 'distance': 600}, {'name': 'СШ №23', 'distance': 800}],
-        'kindergartens': [{'name': 'Детский сад №98', 'distance': 400}, {'name': 'Детский сад №45', 'distance': 650}],
-        'pharmacies': [{'name': 'Аптека 9', 'distance': 350}, {'name': 'Белфармация', 'distance': 550}],
-        'metro': [{'name': 'Партизанская', 'distance': 1800}, {'name': 'Автозаводская', 'distance': 2000}]
+        'schools': [{'name': 'Гимназия №12', 'distance': 600}],
+        'kindergartens': [{'name': 'Детский сад №98', 'distance': 400}],
+        'pharmacies': [{'name': 'Аптека 9', 'distance': 350}],
+        'metro': [{'name': 'Партизанская', 'distance': 1800}]
     },
     'Московский': {
-        'shops': [{'name': 'ТЦ Замок', 'distance': 800}, {'name': 'Корона', 'distance': 500}, {'name': 'Евроопт', 'distance': 300}],
-        'cafes': [{'name': 'Старое кафе', 'distance': 300}, {'name': 'Кофе Хауз', 'distance': 600}],
+        'shops': [{'name': 'ТЦ Замок', 'distance': 800}, {'name': 'Корона', 'distance': 500}],
+        'cafes': [{'name': 'Старое кафе', 'distance': 300}],
         'parks': [{'name': 'Парк им. Горького', 'distance': 1000}],
-        'schools': [{'name': 'СШ №23', 'distance': 400}, {'name': 'Гимназия №12', 'distance': 650}],
-        'kindergartens': [{'name': 'Детский сад №45', 'distance': 350}, {'name': 'Детский сад №156', 'distance': 600}],
-        'pharmacies': [{'name': 'Аптека БФ', 'distance': 200}, {'name': 'Аптека №1', 'distance': 450}],
-        'metro': [{'name': 'Грушевка', 'distance': 800}, {'name': 'Малиновка', 'distance': 1200}]
+        'schools': [{'name': 'СШ №23', 'distance': 400}],
+        'kindergartens': [{'name': 'Детский сад №45', 'distance': 350}],
+        'pharmacies': [{'name': 'Аптека БФ', 'distance': 200}],
+        'metro': [{'name': 'Грушевка', 'distance': 800}]
     },
     'Центральный': {
-        'shops': [{'name': 'ГУМ', 'distance': 400}, {'name': 'ЦУМ', 'distance': 600}, {'name': 'Столица', 'distance': 300}],
-        'cafes': [{'name': 'Столичное', 'distance': 200}, {'name': 'Кофе Хауз', 'distance': 450}],
-        'parks': [{'name': 'Парк Победы', 'distance': 800}, {'name': 'Верхний город', 'distance': 500}],
-        'schools': [{'name': 'СШ №10', 'distance': 300}, {'name': 'Гимназия №5', 'distance': 550}],
-        'kindergartens': [{'name': 'Детский сад №12', 'distance': 400}, {'name': 'Детский сад №45', 'distance': 650}],
-        'pharmacies': [{'name': 'Белфармация', 'distance': 250}, {'name': 'Аптека №1', 'distance': 500}],
-        'metro': [{'name': 'Немига', 'distance': 400}, {'name': 'Купаловская', 'distance': 600}]
+        'shops': [{'name': 'ГУМ', 'distance': 400}, {'name': 'ЦУМ', 'distance': 600}],
+        'cafes': [{'name': 'Столичное', 'distance': 200}],
+        'parks': [{'name': 'Парк Победы', 'distance': 800}],
+        'schools': [{'name': 'СШ №10', 'distance': 300}],
+        'kindergartens': [{'name': 'Детский сад №12', 'distance': 400}],
+        'pharmacies': [{'name': 'Белфармация', 'distance': 250}],
+        'metro': [{'name': 'Немига', 'distance': 400}]
     },
     'Советский': {
-        'shops': [{'name': 'Евроопт', 'distance': 500}, {'name': 'Корона', 'distance': 700}],
-        'cafes': [{'name': 'Кафе "Парк"', 'distance': 600}, {'name': 'Кофе Хауз', 'distance': 800}],
-        'parks': [{'name': 'Ботанический сад', 'distance': 900}, {'name': 'Парк Челюскинцев', 'distance': 1500}],
-        'schools': [{'name': 'Гимназия №5', 'distance': 400}, {'name': 'СШ №23', 'distance': 650}],
-        'kindergartens': [{'name': 'Детский сад №98', 'distance': 500}, {'name': 'Детский сад №156', 'distance': 700}],
-        'pharmacies': [{'name': 'Аптека №1', 'distance': 300}, {'name': 'Белфармация', 'distance': 550}],
-        'metro': [{'name': 'Академия наук', 'distance': 800}, {'name': 'Парк Челюскинцев', 'distance': 1000}]
+        'shops': [{'name': 'Евроопт', 'distance': 500}],
+        'cafes': [{'name': 'Кафе "Парк"', 'distance': 600}],
+        'parks': [{'name': 'Ботанический сад', 'distance': 900}],
+        'schools': [{'name': 'Гимназия №5', 'distance': 400}],
+        'kindergartens': [{'name': 'Детский сад №98', 'distance': 500}],
+        'pharmacies': [{'name': 'Аптека №1', 'distance': 300}],
+        'metro': [{'name': 'Академия наук', 'distance': 800}]
     },
     'Фрунзенский': {
-        'shops': [{'name': 'Евроопт', 'distance': 400}, {'name': 'Алми', 'distance': 600}],
-        'cafes': [{'name': 'Кафе "Уют"', 'distance': 500}, {'name': 'Кофе Хауз', 'distance': 700}],
+        'shops': [{'name': 'Евроопт', 'distance': 400}],
+        'cafes': [{'name': 'Кафе "Уют"', 'distance': 500}],
         'parks': [{'name': 'Парк Дружбы народов', 'distance': 1300}],
-        'schools': [{'name': 'СШ №45', 'distance': 450}, {'name': 'Гимназия №12', 'distance': 700}],
-        'kindergartens': [{'name': 'Детский сад №156', 'distance': 350}, {'name': 'Детский сад №98', 'distance': 600}],
-        'pharmacies': [{'name': 'Аптека 9', 'distance': 300}, {'name': 'Аптека БФ', 'distance': 500}],
-        'metro': [{'name': 'Каменная горка', 'distance': 600}, {'name': 'Спортивная', 'distance': 900}]
+        'schools': [{'name': 'СШ №45', 'distance': 450}],
+        'kindergartens': [{'name': 'Детский сад №156', 'distance': 350}],
+        'pharmacies': [{'name': 'Аптека 9', 'distance': 300}],
+        'metro': [{'name': 'Каменная горка', 'distance': 600}]
     },
     'Октябрьский': {
-        'shops': [{'name': 'Евроопт', 'distance': 450}, {'name': 'Корона', 'distance': 650}],
+        'shops': [{'name': 'Евроопт', 'distance': 450}],
         'cafes': [{'name': 'Кафе "Встреча"', 'distance': 550}],
         'parks': [{'name': 'Парк Курасовщина', 'distance': 1000}],
-        'schools': [{'name': 'СШ №23', 'distance': 500}, {'name': 'Гимназия №5', 'distance': 750}],
-        'kindergartens': [{'name': 'Детский сад №45', 'distance': 400}, {'name': 'Детский сад №98', 'distance': 650}],
+        'schools': [{'name': 'СШ №23', 'distance': 500}],
+        'kindergartens': [{'name': 'Детский сад №45', 'distance': 400}],
         'pharmacies': [{'name': 'Аптека №1', 'distance': 350}],
         'metro': [{'name': 'Ковальская Слобода', 'distance': 1000}]
     },
     'Ленинский': {
-        'shops': [{'name': 'Евроопт', 'distance': 500}, {'name': 'Алми', 'distance': 700}],
+        'shops': [{'name': 'Евроопт', 'distance': 500}],
         'cafes': [{'name': 'Кофе Хауз', 'distance': 600}],
-        'parks': [{'name': 'Лошицкий парк', 'distance': 1500}, {'name': 'Серебрянка', 'distance': 1000}],
-        'schools': [{'name': 'СШ №10', 'distance': 550}, {'name': 'Гимназия №12', 'distance': 800}],
-        'kindergartens': [{'name': 'Детский сад №12', 'distance': 450}, {'name': 'Детский сад №156', 'distance': 700}],
+        'parks': [{'name': 'Лошицкий парк', 'distance': 1500}],
+        'schools': [{'name': 'СШ №10', 'distance': 550}],
+        'kindergartens': [{'name': 'Детский сад №12', 'distance': 450}],
         'pharmacies': [{'name': 'Белфармация', 'distance': 400}],
         'metro': [{'name': 'Чижовка', 'distance': 1200}]
     }
@@ -144,11 +162,9 @@ def calculate_distance_meters(lat1, lon1, lat2, lon2):
     return int(distance((lat1, lon1), (lat2, lon2)).meters)
 
 def get_infrastructure_by_district(district):
-    """Возвращает инфраструктуру по району из резервной базы"""
     return DISTRICT_INFRA.get(district, DISTRICT_INFRA.get('Центральный', {}))
 
 def get_metro_distance_from_coords(lat, lon):
-    """Находит ближайшее метро по координатам"""
     min_dist = 999999
     nearest = None
     for station, coord in METRO_STATIONS.items():
@@ -312,8 +328,7 @@ async def ask_question(update: Update, context):
         "Например:\n"
         "• *Что рядом с первым вариантом?*\n"
         "• *Какое расстояние до кафе?*\n"
-        "• *Есть ли детский сад рядом?*\n"
-        "• *Как далеко до метро?*\n\n"
+        "• *Есть ли детский сад рядом?*\n\n"
         "Просто напишите вопрос в чат!",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
@@ -366,8 +381,6 @@ async def handle_question(update: Update, context):
     
     flat, analysis = results[flat_index]
     district = analysis.get('district', 'Центральный')
-    
-    # Получаем инфраструктуру из резервной базы
     infra = get_infrastructure_by_district(district)
     
     response = f"📊 *Информация о варианте {flat_index + 1}:*\n\n"
@@ -375,125 +388,75 @@ async def handle_question(update: Update, context):
     response += f"📍 {flat['address']}\n"
     response += f"🏘 Район: {district}\n\n"
     
-    # Определяем тип вопроса
     if 'все' in text or 'рядом' in text or 'инфраструктур' in text:
         response += "*🏪 Инфраструктура района:*\n\n"
-        
         if infra.get('shops'):
-            response += "🏪 *Магазины:*\n"
-            for s in infra['shops'][:3]:
-                response += f"   • {s['name']} — {s['distance']} м\n"
-            response += "\n"
-        
+            response += "🏪 *Магазины:*\n" + "\n".join([f"   • {s['name']} — {s['distance']} м" for s in infra['shops'][:3]]) + "\n\n"
         if infra.get('cafes'):
-            response += "☕ *Кафе и рестораны:*\n"
-            for c in infra['cafes'][:2]:
-                response += f"   • {c['name']} — {c['distance']} м\n"
-            response += "\n"
-        
+            response += "☕ *Кафе:*\n" + "\n".join([f"   • {c['name']} — {c['distance']} м" for c in infra['cafes'][:2]]) + "\n\n"
         if infra.get('parks'):
-            response += "🌳 *Парки:*\n"
-            for p in infra['parks'][:2]:
-                response += f"   • {p['name']} — {p['distance']} м\n"
-            response += "\n"
-        
+            response += "🌳 *Парки:*\n" + "\n".join([f"   • {p['name']} — {p['distance']} м" for p in infra['parks'][:2]]) + "\n\n"
         if infra.get('schools'):
-            response += "📚 *Школы:*\n"
-            for s in infra['schools'][:2]:
-                response += f"   • {s['name']} — {s['distance']} м\n"
-            response += "\n"
-        
+            response += "📚 *Школы:*\n" + "\n".join([f"   • {s['name']} — {s['distance']} м" for s in infra['schools'][:2]]) + "\n\n"
         if infra.get('kindergartens'):
-            response += "🏫 *Детские сады:*\n"
-            for k in infra['kindergartens'][:2]:
-                response += f"   • {k['name']} — {k['distance']} м\n"
-            response += "\n"
-        
+            response += "🏫 *Детские сады:*\n" + "\n".join([f"   • {k['name']} — {k['distance']} м" for k in infra['kindergartens'][:2]]) + "\n\n"
         if infra.get('pharmacies'):
-            response += "💊 *Аптеки:*\n"
-            for ph in infra['pharmacies'][:2]:
-                response += f"   • {ph['name']} — {ph['distance']} м\n"
-            response += "\n"
-        
+            response += "💊 *Аптеки:*\n" + "\n".join([f"   • {ph['name']} — {ph['distance']} м" for ph in infra['pharmacies'][:2]]) + "\n\n"
         if infra.get('metro'):
-            response += "🚇 *Метро:*\n"
-            for m in infra['metro'][:2]:
-                response += f"   • {m['name']} — {m['distance']} м\n"
+            response += "🚇 *Метро:*\n" + "\n".join([f"   • {m['name']} — {m['distance']} м" for m in infra['metro'][:2]]) + "\n"
     
-    elif 'кафе' in text or 'ресторан' in text:
+    elif 'кафе' in text:
         if infra.get('cafes'):
-            response += "☕ *Кафе и рестораны рядом:*\n"
-            for c in infra['cafes'][:3]:
-                response += f"• {c['name']} — {c['distance']} м\n"
+            response += "☕ *Кафе рядом:*\n" + "\n".join([f"• {c['name']} — {c['distance']} м" for c in infra['cafes'][:3]])
         else:
-            response += "☕ Кафе в районе не найдены.\n"
+            response += "☕ Кафе в районе не найдены."
     
-    elif 'магазин' in text or 'тц' in text or 'торгов' in text:
+    elif 'магазин' in text or 'тц' in text:
         if infra.get('shops'):
-            response += "🏪 *Магазины и ТЦ рядом:*\n"
-            for s in infra['shops'][:4]:
-                response += f"• {s['name']} — {s['distance']} м\n"
+            response += "🏪 *Магазины рядом:*\n" + "\n".join([f"• {s['name']} — {s['distance']} м" for s in infra['shops'][:4]])
         else:
-            response += "🏪 Магазины в районе не найдены.\n"
+            response += "🏪 Магазины в районе не найдены."
     
-    elif 'парк' in text or 'сквер' in text:
+    elif 'парк' in text:
         if infra.get('parks'):
-            response += "🌳 *Парки рядом:*\n"
-            for p in infra['parks'][:3]:
-                response += f"• {p['name']} — {p['distance']} м\n"
+            response += "🌳 *Парки рядом:*\n" + "\n".join([f"• {p['name']} — {p['distance']} м" for p in infra['parks'][:3]])
         else:
-            response += "🌳 Парки в районе не найдены.\n"
+            response += "🌳 Парки в районе не найдены."
     
     elif 'школ' in text:
         if infra.get('schools'):
-            response += "📚 *Школы рядом:*\n"
-            for s in infra['schools'][:3]:
-                response += f"• {s['name']} — {s['distance']} м\n"
+            response += "📚 *Школы рядом:*\n" + "\n".join([f"• {s['name']} — {s['distance']} м" for s in infra['schools'][:3]])
         else:
-            response += "📚 Школы в районе не найдены.\n"
+            response += "📚 Школы в районе не найдены."
     
     elif 'детск' in text or 'сад' in text:
         if infra.get('kindergartens'):
-            response += "🏫 *Детские сады рядом:*\n"
-            for k in infra['kindergartens'][:3]:
-                response += f"• {k['name']} — {k['distance']} м\n"
+            response += "🏫 *Детские сады рядом:*\n" + "\n".join([f"• {k['name']} — {k['distance']} м" for k in infra['kindergartens'][:3]])
         else:
-            response += "🏫 Детские сады в районе не найдены.\n"
+            response += "🏫 Детские сады в районе не найдены."
     
     elif 'аптек' in text:
         if infra.get('pharmacies'):
-            response += "💊 *Аптеки рядом:*\n"
-            for ph in infra['pharmacies'][:3]:
-                response += f"• {ph['name']} — {ph['distance']} м\n"
+            response += "💊 *Аптеки рядом:*\n" + "\n".join([f"• {ph['name']} — {ph['distance']} м" for ph in infra['pharmacies'][:3]])
         else:
-            response += "💊 Аптеки в районе не найдены.\n"
+            response += "💊 Аптеки в районе не найдены."
     
     elif 'метро' in text:
         if infra.get('metro'):
-            response += "🚇 *Метро рядом:*\n"
-            for m in infra['metro'][:3]:
-                response += f"• {m['name']} — {m['distance']} м\n"
+            response += "🚇 *Метро рядом:*\n" + "\n".join([f"• {m['name']} — {m['distance']} м" for m in infra['metro'][:3]])
         else:
-            # Пробуем найти по координатам
             lat, lon = analysis.get('lat'), analysis.get('lon')
             if lat and lon:
                 nearest, dist = get_metro_distance_from_coords(lat, lon)
                 if nearest:
-                    response += f"🚇 *Ближайшее метро:* {nearest} — {dist} м\n"
+                    response += f"🚇 *Ближайшее метро:* {nearest} — {dist} м"
                 else:
-                    response += "🚇 Метро в районе не найдено.\n"
+                    response += "🚇 Метро в районе не найдено."
             else:
-                response += "🚇 Метро в районе не найдено.\n"
+                response += "🚇 Метро в районе не найдено."
     
     else:
-        response += "Я могу ответить на вопросы о:\n"
-        response += "• инфраструктуре района\n"
-        response += "• магазинах и ТЦ\n"
-        response += "• кафе и ресторанах\n"
-        response += "• парках\n"
-        response += "• школах и детских садах\n"
-        response += "• аптеках\n"
-        response += "• метро"
+        response += "Я могу ответить на вопросы о:\n• инфраструктуре района\n• магазинах и ТЦ\n• кафе\n• парках\n• школах и детских садах\n• аптеках\n• метро"
     
     await update.message.reply_text(response, parse_mode="Markdown")
     

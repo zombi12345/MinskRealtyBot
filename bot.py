@@ -1,12 +1,42 @@
+import os
+import signal
+import subprocess
+import time
 import json
 import re
-import requests
 import logging
-import os
+from threading import Thread
+from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from geopy.distance import distance
 from functools import lru_cache
+
+# ===== БЕЗОПАСНАЯ ОСТАНОВКА СТАРЫХ ЭКЗЕМПЛЯРОВ =====
+def stop_old_bots():
+    try:
+        current_pid = os.getpid()
+        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True)
+        killed = 0
+        for line in result.stdout.split('\n'):
+            if 'bot.py' in line and 'python' in line and 'grep' not in line:
+                parts = line.split()
+                if len(parts) > 1:
+                    try:
+                        pid = int(parts[1])
+                        if pid != current_pid and pid != 0:
+                            os.kill(pid, signal.SIGTERM)
+                            killed += 1
+                            time.sleep(0.3)
+                    except:
+                        pass
+        if killed > 0:
+            print(f"✅ Остановлено {killed} старых процессов")
+    except Exception as e:
+        print(f"⚠️ Ошибка: {e}")
+
+stop_old_bots()
+# ========================================
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -14,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "7227182736:AAHs6widEwBl6AJUebqaA_-z7x6XACi39BE"
 
-# Координаты станций метро Минска
+# Координаты станций метро
 METRO_STATIONS = {
     'Немига': (53.9065, 27.5550), 'Купаловская': (53.9075, 27.5620),
     'Октябрьская': (53.9000, 27.5600), 'Площадь Ленина': (53.8960, 27.5510),
@@ -28,77 +58,77 @@ METRO_STATIONS = {
     'Площадь Победы': (53.9100, 27.5750), 'Вокзальная': (53.8900, 27.5490)
 }
 
-# Резервные данные по районам
+# Резервные данные по районам (расширенные)
 DISTRICT_INFRA = {
+    'Центральный': {
+        'shops': [{'name': 'ГУМ', 'distance': 400}, {'name': 'ЦУМ', 'distance': 600}, {'name': 'Столица', 'distance': 300}],
+        'cafes': [{'name': 'Столичное', 'distance': 200}, {'name': 'Кофе Хауз', 'distance': 450}, {'name': 'Беларусь', 'distance': 550}],
+        'parks': [{'name': 'Парк Победы', 'distance': 800}, {'name': 'Верхний город', 'distance': 500}],
+        'schools': [{'name': 'СШ №10', 'distance': 300}, {'name': 'Гимназия №5', 'distance': 550}],
+        'kindergartens': [{'name': 'Детский сад №12', 'distance': 400}, {'name': 'Детский сад №45', 'distance': 650}],
+        'pharmacies': [{'name': 'Белфармация', 'distance': 250}, {'name': 'Аптека №1', 'distance': 500}],
+        'metro': [{'name': 'Немига', 'distance': 400}, {'name': 'Купаловская', 'distance': 600}]
+    },
     'Партизанский': {
         'shops': [{'name': 'Евроопт', 'distance': 350}, {'name': 'Корона', 'distance': 600}],
-        'cafes': [{'name': 'Кафе "Уют"', 'distance': 400}],
+        'cafes': [{'name': 'Кафе "Уют"', 'distance': 400}, {'name': 'Кофе Хауз', 'distance': 700}],
         'parks': [{'name': 'Парк им. Челюскинцев', 'distance': 1200}],
-        'schools': [{'name': 'СШ №45', 'distance': 500}],
-        'kindergartens': [{'name': 'Детский сад №156', 'distance': 300}],
-        'pharmacies': [{'name': 'Аптека №1', 'distance': 250}],
+        'schools': [{'name': 'СШ №45', 'distance': 500}, {'name': 'Гимназия №5', 'distance': 800}],
+        'kindergartens': [{'name': 'Детский сад №156', 'distance': 300}, {'name': 'Детский сад №98', 'distance': 600}],
+        'pharmacies': [{'name': 'Аптека №1', 'distance': 250}, {'name': 'Аптека БФ', 'distance': 500}],
         'metro': [{'name': 'Партизанская', 'distance': 1500}]
     },
     'Заводской': {
         'shops': [{'name': 'Алми', 'distance': 400}, {'name': 'Соседи', 'distance': 700}],
-        'cafes': [{'name': 'Кофе Хауз', 'distance': 500}],
+        'cafes': [{'name': 'Кофе Хауз', 'distance': 500}, {'name': 'Кафе "Встреча"', 'distance': 750}],
         'parks': [{'name': 'Парк 50-летия Октября', 'distance': 1500}],
-        'schools': [{'name': 'Гимназия №12', 'distance': 600}],
-        'kindergartens': [{'name': 'Детский сад №98', 'distance': 400}],
-        'pharmacies': [{'name': 'Аптека 9', 'distance': 350}],
+        'schools': [{'name': 'Гимназия №12', 'distance': 600}, {'name': 'СШ №23', 'distance': 800}],
+        'kindergartens': [{'name': 'Детский сад №98', 'distance': 400}, {'name': 'Детский сад №45', 'distance': 650}],
+        'pharmacies': [{'name': 'Аптека 9', 'distance': 350}, {'name': 'Белфармация', 'distance': 550}],
         'metro': [{'name': 'Партизанская', 'distance': 1800}]
     },
     'Московский': {
-        'shops': [{'name': 'ТЦ Замок', 'distance': 800}, {'name': 'Корона', 'distance': 500}],
-        'cafes': [{'name': 'Старое кафе', 'distance': 300}],
+        'shops': [{'name': 'ТЦ Замок', 'distance': 800}, {'name': 'Корона', 'distance': 500}, {'name': 'Евроопт', 'distance': 300}],
+        'cafes': [{'name': 'Старое кафе', 'distance': 300}, {'name': 'Кофе Хауз', 'distance': 600}],
         'parks': [{'name': 'Парк им. Горького', 'distance': 1000}],
-        'schools': [{'name': 'СШ №23', 'distance': 400}],
-        'kindergartens': [{'name': 'Детский сад №45', 'distance': 350}],
-        'pharmacies': [{'name': 'Аптека БФ', 'distance': 200}],
-        'metro': [{'name': 'Грушевка', 'distance': 800}]
-    },
-    'Центральный': {
-        'shops': [{'name': 'ГУМ', 'distance': 400}, {'name': 'ЦУМ', 'distance': 600}],
-        'cafes': [{'name': 'Столичное', 'distance': 200}],
-        'parks': [{'name': 'Парк Победы', 'distance': 800}],
-        'schools': [{'name': 'СШ №10', 'distance': 300}],
-        'kindergartens': [{'name': 'Детский сад №12', 'distance': 400}],
-        'pharmacies': [{'name': 'Белфармация', 'distance': 250}],
-        'metro': [{'name': 'Немига', 'distance': 400}]
+        'schools': [{'name': 'СШ №23', 'distance': 400}, {'name': 'Гимназия №12', 'distance': 650}],
+        'kindergartens': [{'name': 'Детский сад №45', 'distance': 350}, {'name': 'Детский сад №156', 'distance': 600}],
+        'pharmacies': [{'name': 'Аптека БФ', 'distance': 200}, {'name': 'Аптека №1', 'distance': 450}],
+        'metro': [{'name': 'Грушевка', 'distance': 800}, {'name': 'Малиновка', 'distance': 1200}]
     },
     'Советский': {
-        'shops': [{'name': 'Евроопт', 'distance': 500}],
-        'cafes': [{'name': 'Кафе "Парк"', 'distance': 600}],
-        'parks': [{'name': 'Ботанический сад', 'distance': 900}],
-        'schools': [{'name': 'Гимназия №5', 'distance': 400}],
-        'kindergartens': [{'name': 'Детский сад №98', 'distance': 500}],
-        'pharmacies': [{'name': 'Аптека №1', 'distance': 300}],
-        'metro': [{'name': 'Академия наук', 'distance': 800}]
+        'shops': [{'name': 'Евроопт', 'distance': 500}, {'name': 'Корона', 'distance': 700}],
+        'cafes': [{'name': 'Кафе "Парк"', 'distance': 600}, {'name': 'Кофе Хауз', 'distance': 800}],
+        'parks': [{'name': 'Ботанический сад', 'distance': 900}, {'name': 'Парк Челюскинцев', 'distance': 1500}],
+        'schools': [{'name': 'Гимназия №5', 'distance': 400}, {'name': 'СШ №23', 'distance': 650}],
+        'kindergartens': [{'name': 'Детский сад №98', 'distance': 500}, {'name': 'Детский сад №156', 'distance': 700}],
+        'pharmacies': [{'name': 'Аптека №1', 'distance': 300}, {'name': 'Белфармация', 'distance': 550}],
+        'metro': [{'name': 'Академия наук', 'distance': 800}, {'name': 'Парк Челюскинцев', 'distance': 1000}]
     },
     'Фрунзенский': {
-        'shops': [{'name': 'Евроопт', 'distance': 400}],
-        'cafes': [{'name': 'Кафе "Уют"', 'distance': 500}],
+        'shops': [{'name': 'Евроопт', 'distance': 400}, {'name': 'Алми', 'distance': 600}],
+        'cafes': [{'name': 'Кафе "Уют"', 'distance': 500}, {'name': 'Кофе Хауз', 'distance': 700}],
         'parks': [{'name': 'Парк Дружбы народов', 'distance': 1300}],
-        'schools': [{'name': 'СШ №45', 'distance': 450}],
-        'kindergartens': [{'name': 'Детский сад №156', 'distance': 350}],
-        'pharmacies': [{'name': 'Аптека 9', 'distance': 300}],
-        'metro': [{'name': 'Каменная горка', 'distance': 600}]
+        'schools': [{'name': 'СШ №45', 'distance': 450}, {'name': 'Гимназия №12', 'distance': 700}],
+        'kindergartens': [{'name': 'Детский сад №156', 'distance': 350}, {'name': 'Детский сад №98', 'distance': 600}],
+        'pharmacies': [{'name': 'Аптека 9', 'distance': 300}, {'name': 'Аптека БФ', 'distance': 500}],
+        'metro': [{'name': 'Каменная горка', 'distance': 600}, {'name': 'Спортивная', 'distance': 900}]
     },
     'Октябрьский': {
-        'shops': [{'name': 'Евроопт', 'distance': 450}],
+        'shops': [{'name': 'Евроопт', 'distance': 450}, {'name': 'Корона', 'distance': 650}],
         'cafes': [{'name': 'Кафе "Встреча"', 'distance': 550}],
         'parks': [{'name': 'Парк Курасовщина', 'distance': 1000}],
-        'schools': [{'name': 'СШ №23', 'distance': 500}],
-        'kindergartens': [{'name': 'Детский сад №45', 'distance': 400}],
+        'schools': [{'name': 'СШ №23', 'distance': 500}, {'name': 'Гимназия №5', 'distance': 750}],
+        'kindergartens': [{'name': 'Детский сад №45', 'distance': 400}, {'name': 'Детский сад №98', 'distance': 650}],
         'pharmacies': [{'name': 'Аптека №1', 'distance': 350}],
         'metro': [{'name': 'Ковальская Слобода', 'distance': 1000}]
     },
     'Ленинский': {
-        'shops': [{'name': 'Евроопт', 'distance': 500}],
+        'shops': [{'name': 'Евроопт', 'distance': 500}, {'name': 'Алми', 'distance': 700}],
         'cafes': [{'name': 'Кофе Хауз', 'distance': 600}],
-        'parks': [{'name': 'Лошицкий парк', 'distance': 1500}],
-        'schools': [{'name': 'СШ №10', 'distance': 550}],
-        'kindergartens': [{'name': 'Детский сад №12', 'distance': 450}],
+        'parks': [{'name': 'Лошицкий парк', 'distance': 1500}, {'name': 'Серебрянка', 'distance': 1000}],
+        'schools': [{'name': 'СШ №10', 'distance': 550}, {'name': 'Гимназия №12', 'distance': 800}],
+        'kindergartens': [{'name': 'Детский сад №12', 'distance': 450}, {'name': 'Детский сад №156', 'distance': 700}],
         'pharmacies': [{'name': 'Белфармация', 'distance': 400}],
         'metro': [{'name': 'Чижовка', 'distance': 1200}]
     }
@@ -340,7 +370,7 @@ async def handle_question(update: Update, context):
         if infra.get('shops'):
             response += "🏪 *Магазины:*\n" + "\n".join([f"   • {s['name']} — {s['distance']} м" for s in infra['shops'][:3]]) + "\n\n"
         if infra.get('cafes'):
-            response += "☕ *Кафе:*\n" + "\n".join([f"   • {c['name']} — {c['distance']} м" for c in infra['cafes'][:2]]) + "\n\n"
+            response += "☕ *Кафе:*\n" + "\n".join([f"   • {c['name']} — {c['distance']} м" for c in infra['cafes'][:3]]) + "\n\n"
         if infra.get('parks'):
             response += "🌳 *Парки:*\n" + "\n".join([f"   • {p['name']} — {p['distance']} м" for p in infra['parks'][:2]]) + "\n\n"
         if infra.get('schools'):
@@ -405,6 +435,25 @@ async def handle_question(update: Update, context):
             InlineKeyboardButton("◀️ Вернуться к вариантам", callback_data="back")
         ]])
     )
+
+# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER (ЧТОБЫ ПОРТ БЫЛ ОТКРЫТ) =====
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def health():
+    return "🤖 Бот работает!", 200
+
+@flask_app.route('/health')
+def health_check():
+    return {"status": "ok", "flats": len(FLATS)}, 200
+
+def run_web():
+    port = int(os.environ.get('PORT', 10000))
+    flask_app.run(host='0.0.0.0', port=port)
+
+web_thread = Thread(target=run_web, daemon=True)
+web_thread.start()
+# ========================================
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()

@@ -3,10 +3,13 @@ import re
 import requests
 import logging
 import os
+import asyncio
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 from geopy.distance import distance
 from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -15,33 +18,16 @@ BOT_TOKEN = "7227182736:AAHs6widEwBl6AJUebqaA_-z7x6XACi39BE"
 
 # Координаты станций метро Минска
 METRO_STATIONS = {
-    'Немига': {'lat': 53.9065, 'lon': 27.5550},
-    'Купаловская': {'lat': 53.9075, 'lon': 27.5620},
-    'Октябрьская': {'lat': 53.9000, 'lon': 27.5600},
-    'Площадь Ленина': {'lat': 53.8960, 'lon': 27.5510},
-    'Институт культуры': {'lat': 53.8940, 'lon': 27.5420},
-    'Грушевка': {'lat': 53.8780, 'lon': 27.5230},
-    'Малиновка': {'lat': 53.8600, 'lon': 27.5280},
-    'Петровщина': {'lat': 53.8700, 'lon': 27.5400},
-    'Михалово': {'lat': 53.8550, 'lon': 27.5200},
-    'Каменная горка': {'lat': 53.8930, 'lon': 27.4630},
-    'Кунцевщина': {'lat': 53.8860, 'lon': 27.4420},
-    'Спортивная': {'lat': 53.8950, 'lon': 27.4780},
-    'Пушкинская': {'lat': 53.9040, 'lon': 27.5020},
-    'Молодежная': {'lat': 53.8980, 'lon': 27.4280},
-    'Фрунзенская': {'lat': 53.9140, 'lon': 27.5160},
-    'Вокзальная': {'lat': 53.8900, 'lon': 27.5490},
-    'Партизанская': {'lat': 53.8620, 'lon': 27.6090},
-    'Автозаводская': {'lat': 53.8620, 'lon': 27.6320},
-    'Могилевская': {'lat': 53.8570, 'lon': 27.6580},
-    'Уручье': {'lat': 53.9460, 'lon': 27.6910},
-    'Борисовский тракт': {'lat': 53.9350, 'lon': 27.6550},
-    'Восток': {'lat': 53.9230, 'lon': 27.6310},
-    'Московская': {'lat': 53.9140, 'lon': 27.5920},
-    'Парк Челюскинцев': {'lat': 53.9230, 'lon': 27.6100},
-    'Академия наук': {'lat': 53.9200, 'lon': 27.5990},
-    'Якуба Коласа': {'lat': 53.9170, 'lon': 27.5830},
-    'Площадь Победы': {'lat': 53.9100, 'lon': 27.5750}
+    'Немига': (53.9065, 27.5550), 'Купаловская': (53.9075, 27.5620),
+    'Октябрьская': (53.9000, 27.5600), 'Площадь Ленина': (53.8960, 27.5510),
+    'Институт культуры': (53.8940, 27.5420), 'Грушевка': (53.8780, 27.5230),
+    'Малиновка': (53.8600, 27.5280), 'Каменная горка': (53.8930, 27.4630),
+    'Спортивная': (53.8950, 27.4780), 'Пушкинская': (53.9040, 27.5020),
+    'Партизанская': (53.8620, 27.6090), 'Автозаводская': (53.8620, 27.6320),
+    'Могилевская': (53.8570, 27.6580), 'Уручье': (53.9460, 27.6910),
+    'Восток': (53.9230, 27.6310), 'Московская': (53.9140, 27.5920),
+    'Парк Челюскинцев': (53.9230, 27.6100), 'Академия наук': (53.9200, 27.5990),
+    'Площадь Победы': (53.9100, 27.5750), 'Вокзальная': (53.8900, 27.5490)
 }
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -55,6 +41,20 @@ except Exception as e:
     logger.error(f"❌ Ошибка загрузки: {e}")
     FLATS = []
 
+# Кэш для API запросов
+api_cache = {}
+cache_duration = timedelta(hours=24)
+
+def get_from_cache(key):
+    if key in api_cache:
+        data, timestamp = api_cache[key]
+        if datetime.now() - timestamp < cache_duration:
+            return data
+    return None
+
+def set_to_cache(key, data):
+    api_cache[key] = (data, datetime.now())
+
 def calculate_distance(lat1, lon1, lat2, lon2):
     if not all([lat1, lon1, lat2, lon2]):
         return 999
@@ -65,35 +65,57 @@ def calculate_distance_meters(lat1, lon1, lat2, lon2):
         return 999999
     return int(distance((lat1, lon1), (lat2, lon2)).meters)
 
+@lru_cache(maxsize=200)
+def get_metro_distance(lat, lon):
+    """Находит ближайшую станцию метро"""
+    min_dist = 999999
+    nearest = None
+    for station, coord in METRO_STATIONS.items():
+        dist = calculate_distance_meters(lat, lon, coord[0], coord[1])
+        if dist < min_dist:
+            min_dist = dist
+            nearest = station
+    return nearest, min_dist
+
 @lru_cache(maxsize=100)
-def find_nearby_pois_cached(lat, lon, radius=1000):
-    if not lat or not lon:
-        return {}
+def get_osm_pois(lat, lon, radius=800):
+    """Поиск POI через OpenStreetMap Overpass API"""
+    cache_key = f"osm_{lat}_{lon}_{radius}"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+    
     query = f"""
-    [out:json][timeout:10];
+    [out:json][timeout:12];
     (
-      node["shop"~"supermarket|convenience"](around:{radius},{lat},{lon});
-      node["amenity"~"kindergarten|school|pharmacy|cafe|restaurant"](around:{radius},{lat},{lon});
+      node["shop"~"supermarket|convenience|mall"](around:{radius},{lat},{lon});
+      node["amenity"~"kindergarten|school|pharmacy|cafe|restaurant|fast_food"](around:{radius},{lat},{lon});
       node["leisure"="park"](around:{radius},{lat},{lon});
     );
     out body;
     """
     try:
-        r = requests.post("https://overpass-api.de/api/interpreter", data=query, timeout=10)
+        r = requests.post("https://overpass-api.de/api/interpreter", data=query, timeout=12)
         if r.status_code == 200:
-            return parse_poi(r.json(), lat, lon)
+            result = parse_osm_response(r.json(), lat, lon)
+            set_to_cache(cache_key, result)
+            return result
     except Exception as e:
-        logger.warning(f"POI API error: {e}")
-    return {}
+        logger.warning(f"OSM API error: {e}")
+    
+    # Возвращаем пустой результат, если API не ответил
+    return {'shops': [], 'cafes': [], 'parks': [], 'schools': [], 'kindergartens': [], 'pharmacies': []}
 
-def parse_poi(data, lat, lon):
-    results = {'shops': [], 'kindergartens': [], 'schools': [], 'pharmacies': [], 'cafes': [], 'parks': []}
+def parse_osm_response(data, lat, lon):
+    results = {'shops': [], 'cafes': [], 'parks': [], 'schools': [], 'kindergartens': [], 'pharmacies': []}
+    
     for el in data.get('elements', []):
         tags = el.get('tags', {})
         el_lat, el_lon = el.get('lat', 0), el.get('lon', 0)
-        dist = int(distance((lat, lon), (el_lat, el_lon)).meters)
+        dist = calculate_distance_meters(lat, lon, el_lat, el_lon)
         name = tags.get('name', '')
-        if tags.get('shop'):
+        
+        if tags.get('shop') in ['supermarket', 'convenience', 'mall']:
             results['shops'].append({'name': name or 'Магазин', 'distance': dist})
         elif tags.get('amenity') == 'kindergarten':
             results['kindergartens'].append({'name': name or 'Детский сад', 'distance': dist})
@@ -101,19 +123,36 @@ def parse_poi(data, lat, lon):
             results['schools'].append({'name': name or 'Школа', 'distance': dist})
         elif tags.get('amenity') == 'pharmacy':
             results['pharmacies'].append({'name': name or 'Аптека', 'distance': dist})
-        elif tags.get('amenity') in ['cafe', 'restaurant']:
+        elif tags.get('amenity') in ['cafe', 'restaurant', 'fast_food']:
             results['cafes'].append({'name': name or 'Кафе', 'distance': dist})
         elif tags.get('leisure') == 'park':
             results['parks'].append({'name': name or 'Парк', 'distance': dist})
+    
     for cat in results:
-        results[cat] = sorted(results[cat], key=lambda x: x['distance'])[:3]
+        results[cat] = sorted(results[cat], key=lambda x: x['distance'])[:4]
+    
     return results
+
+@lru_cache(maxsize=100)
+def get_yandex_geocode(address):
+    """Геокодирование через Yandex API"""
+    cache_key = f"geo_{address}"
+    cached = get_from_cache(cache_key)
+    if cached:
+        return cached
+    
+    try:
+        url = f"https://geocode-maps.yandex.ru/1.x/?apikey=ваш_ключ&geocode={address}&format=json"
+        # Пока используем заглушку, так как ключ нужно получить отдельно
+        return None
+    except:
+        return None
 
 def extract_user_needs(text):
     text_lower = text.lower()
     needs = {'rooms': None, 'max_price': None, 'floor': None, 'metro_station': None}
     
-    if 'трёхкомнатн' in text_lower or 'трехкомнатн' in text_lower or '3-комнатн' in text_lower or '3 комнаты' in text_lower or 'трёшк' in text_lower:
+    if 'трёхкомнатн' in text_lower or 'трехкомнатн' in text_lower or '3-комнатн' in text_lower or '3 комнаты' in text_lower:
         needs['rooms'] = 3
     elif '2' in text_lower or 'двух' in text_lower or 'двушк' in text_lower:
         needs['rooms'] = 2
@@ -140,21 +179,25 @@ def score_flat(flat, needs):
     score, max_score = 0, 0
     matches = []
     
-    max_score += 35
+    max_score += 30
     if needs['rooms'] is not None:
         if flat['rooms'] == needs['rooms']:
-            score += 35
+            score += 30
             matches.append(f"✅ {flat['rooms']}-комнатная")
+        else:
+            matches.append(f"ℹ️ {flat['rooms']}-комнатная (запрошена {needs['rooms']})")
     else:
-        score += 35
+        score += 30
     
-    max_score += 35
+    max_score += 30
     if needs['max_price'] is not None:
         if flat['price_usd'] <= needs['max_price']:
-            score += 35
+            score += 30
             matches.append(f"✅ {flat['price_usd']}$ (бюджет {needs['max_price']}$)")
+        else:
+            matches.append(f"⚠️ {flat['price_usd']}$ (бюджет {needs['max_price']}$)")
     else:
-        score += 35
+        score += 30
     
     max_score += 15
     if needs['floor'] is not None:
@@ -162,19 +205,22 @@ def score_flat(flat, needs):
         if flat_floor and flat_floor == needs['floor']:
             score += 15
             matches.append(f"✅ Этаж {flat_floor}")
+        elif flat_floor:
+            matches.append(f"ℹ️ Этаж {flat_floor} (запрошен {needs['floor']})")
+    else:
+        score += 15
     
-    # Поиск метро
     if needs['metro_station'] and lat and lon:
         station_coord = METRO_STATIONS.get(needs['metro_station'])
         if station_coord:
-            dist = calculate_distance_meters(lat, lon, station_coord['lat'], station_coord['lon'])
+            dist = calculate_distance_meters(lat, lon, station_coord[0], station_coord[1])
             if dist < 1500:
-                score += 15
-                max_score += 15
+                score += 25
+                max_score += 25
                 matches.append(f"✅ 🚇 метро {needs['metro_station']}: {dist} м")
             else:
-                max_score += 15
-                matches.append(f"ℹ️ 🚇 метро {needs['metro_station']}: {dist} м (далековато)")
+                max_score += 25
+                matches.append(f"ℹ️ 🚇 метро {needs['metro_station']}: {dist} м")
     
     match_percent = int((score / max_score) * 100) if max_score > 0 else 0
     return {'match_percent': match_percent, 'matches': matches, 'lat': lat, 'lon': lon}
@@ -195,12 +241,11 @@ async def start(update: Update, context):
         "• Количество комнат (1,2,3)\n"
         "• Цену (до 100000$)\n"
         "• Этаж (на 3 этаже)\n"
-        "• Станции метро (Немига, Каменная горка и др.)\n\n"
+        "• Станции метро\n\n"
         "📝 *Примеры:*\n"
-        "`Найди 3-комнатную до 100000$ рядом с метро Немига`\n"
-        "`2 комнаты до 80000$ возле метро Каменная горка`\n\n"
+        "`Найди 3-комнатную до 100000$ рядом с метро Немига`\n\n"
         "После результатов можно спросить:\n"
-        "• *Какие магазины рядом с первым вариантом?*\n"
+        "• *Какие магазины рядом с первым?*\n"
         "• *Что есть из инфраструктуры?*",
         parse_mode="Markdown"
     )
@@ -216,10 +261,8 @@ async def search_flats(update: Update, context):
     scored.sort(key=lambda x: x[1]['match_percent'], reverse=True)
     top = scored[:5]
     
-    # Сохраняем результаты в контекст
     context.user_data['last_results'] = top
     context.user_data['last_needs'] = needs
-    context.user_data['last_query'] = text
     
     msg = f"🔍 *Варианты 1-{min(3, len(top))} из {len(top)}:*\n\n"
     for i, (flat, analysis) in enumerate(top[:3], 1):
@@ -228,7 +271,7 @@ async def search_flats(update: Update, context):
     
     keyboard = [
         [InlineKeyboardButton("📋 Следующие варианты", callback_data="next")],
-        [InlineKeyboardButton("❓ Задать вопрос о варианте", callback_data="ask")]
+        [InlineKeyboardButton("❓ Спросить о варианте", callback_data="ask")]
     ]
     
     await thinking.edit_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -247,7 +290,6 @@ async def next_flats(update: Update, context):
     start, end = idx, min(idx + 3, len(results))
     if start >= len(results):
         start, end = 0, 3
-        idx = 3
     
     msg = f"🔍 *Варианты {start+1}-{end} из {len(results)}:*\n\n"
     for i, (flat, analysis) in enumerate(results[start:end], start + 1):
@@ -257,7 +299,7 @@ async def next_flats(update: Update, context):
     context.user_data['idx'] = end
     keyboard = [
         [InlineKeyboardButton("📋 Еще варианты", callback_data="next")],
-        [InlineKeyboardButton("❓ Задать вопрос о варианте", callback_data="ask")]
+        [InlineKeyboardButton("❓ Спросить о варианте", callback_data="ask")]
     ]
     await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -267,13 +309,13 @@ async def ask_question(update: Update, context):
     await query.edit_message_text(
         "💬 *Задайте вопрос о вариантах*\n\n"
         "Например:\n"
-        "• *Какие магазины рядом с первым вариантом?*\n"
-        "• *Что рядом со вторым вариантом?*\n"
-        "• *Есть ли парк рядом с третьим?*\n\n"
-        "Вопросы можно задавать прямо в чат!",
+        "• *Какие магазины рядом с первым?*\n"
+        "• *Что есть из инфраструктуры?*\n"
+        "• *Есть ли парк рядом?*\n\n"
+        "Просто напишите вопрос в чат!",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("◀️ Вернуться к вариантам", callback_data="back")
+            InlineKeyboardButton("◀️ К вариантам", callback_data="back")
         ]])
     )
     context.user_data['waiting_for_question'] = True
@@ -294,14 +336,13 @@ async def back_to_results(update: Update, context):
     
     keyboard = [
         [InlineKeyboardButton("📋 Следующие варианты", callback_data="next")],
-        [InlineKeyboardButton("❓ Задать вопрос о варианте", callback_data="ask")]
+        [InlineKeyboardButton("❓ Спросить о варианте", callback_data="ask")]
     ]
     await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
     context.user_data['waiting_for_question'] = False
 
 async def handle_question(update: Update, context):
     if not context.user_data.get('waiting_for_question'):
-        # Если не в режиме вопросов, обрабатываем как обычный поиск
         await search_flats(update, context)
         return
     
@@ -315,117 +356,96 @@ async def handle_question(update: Update, context):
     
     # Определяем номер варианта
     flat_index = 0
-    if 'перв' in text or 'первая' in text or '1' in text:
+    if 'перв' in text or '1' in text:
         flat_index = 0
-    elif 'втор' in text or 'вторая' in text or '2' in text:
+    elif 'втор' in text or '2' in text:
         flat_index = 1 if len(results) > 1 else 0
-    elif 'треть' in text or 'третья' in text or '3' in text:
+    elif 'треть' in text or '3' in text:
         flat_index = 2 if len(results) > 2 else 0
     
     flat, analysis = results[flat_index]
     lat, lon = analysis.get('lat'), analysis.get('lon')
+    
+    # Отправляем сообщение о загрузке
+    thinking = await update.message.reply_text("🔍 *Ищу информацию...*", parse_mode="Markdown")
     
     response = f"📊 *Информация о варианте {flat_index + 1}:*\n\n"
     response += f"🏠 *{flat['rooms']}к, {flat['price_usd']}$*\n"
     response += f"📍 {flat['address']}\n"
     response += f"🏘 Район: {flat['district']}\n\n"
     
-    # Поиск инфраструктуры
     if lat and lon:
-        if 'магазин' in text or 'тц' in text or 'торгов' in text:
-            poi = find_nearby_pois_cached(lat, lon)
-            shops = poi.get('shops', [])
-            if shops:
-                response += "*🏪 Магазины рядом:*\n"
-                for s in shops[:3]:
+        # Метро
+        nearest_metro, metro_dist = get_metro_distance(lat, lon)
+        if nearest_metro:
+            response += f"🚇 *Метро:* {nearest_metro} — {metro_dist} м\n\n"
+        
+        # POI через OSM API
+        pois = get_osm_pois(lat, lon)
+        
+        added = False
+        
+        if 'магазин' in text or 'тц' in text or 'все' in text:
+            if pois.get('shops'):
+                response += "🏪 *Магазины рядом:*\n"
+                for s in pois['shops'][:4]:
                     response += f"• {s['name']} — {s['distance']} м\n"
-            else:
-                response += "🏪 Магазины в радиусе 1 км не найдены.\n"
+                added = True
         
-        elif 'школ' in text:
-            poi = find_nearby_pois_cached(lat, lon)
-            schools = poi.get('schools', [])
-            if schools:
-                response += "*📚 Школы рядом:*\n"
-                for s in schools[:3]:
-                    response += f"• {s['name']} — {s['distance']} м\n"
-            else:
-                response += "📚 Школы в радиусе 1 км не найдены.\n"
-        
-        elif 'сад' in text or 'детск' in text:
-            poi = find_nearby_pois_cached(lat, lon)
-            kindergartens = poi.get('kindergartens', [])
-            if kindergartens:
-                response += "*🏫 Детские сады рядом:*\n"
-                for k in kindergartens[:3]:
-                    response += f"• {k['name']} — {k['distance']} м\n"
-            else:
-                response += "🏫 Детские сады в радиусе 1 км не найдены.\n"
-        
-        elif 'парк' in text:
-            poi = find_nearby_pois_cached(lat, lon)
-            parks = poi.get('parks', [])
-            if parks:
-                response += "*🌳 Парки рядом:*\n"
-                for p in parks[:3]:
-                    response += f"• {p['name']} — {p['distance']} м\n"
-            else:
-                response += "🌳 Парки в радиусе 1 км не найдены.\n"
-        
-        elif 'кафе' in text or 'ресторан' in text:
-            poi = find_nearby_pois_cached(lat, lon)
-            cafes = poi.get('cafes', [])
-            if cafes:
-                response += "*☕ Кафе и рестораны рядом:*\n"
-                for c in cafes[:3]:
+        if 'кафе' in text or 'ресторан' in text or 'все' in text:
+            if pois.get('cafes'):
+                response += "\n☕ *Кафе и рестораны:*\n"
+                for c in pois['cafes'][:4]:
                     response += f"• {c['name']} — {c['distance']} м\n"
-            else:
-                response += "☕ Кафе в радиусе 1 км не найдены.\n"
+                added = True
         
-        elif 'аптек' in text:
-            poi = find_nearby_pois_cached(lat, lon)
-            pharmacies = poi.get('pharmacies', [])
-            if pharmacies:
-                response += "*💊 Аптеки рядом:*\n"
-                for p in pharmacies[:3]:
+        if 'парк' in text or 'все' in text:
+            if pois.get('parks'):
+                response += "\n🌳 *Парки:*\n"
+                for p in pois['parks'][:4]:
                     response += f"• {p['name']} — {p['distance']} м\n"
-            else:
-                response += "💊 Аптеки в радиусе 1 км не найдены.\n"
+                added = True
         
-        elif 'метро' in text:
-            # Ищем ближайшее метро
-            min_dist = 999999
-            nearest_metro = None
-            for station, coord in METRO_STATIONS.items():
-                dist = calculate_distance_meters(lat, lon, coord['lat'], coord['lon'])
-                if dist < min_dist:
-                    min_dist = dist
-                    nearest_metro = station
-            if nearest_metro:
-                response += f"🚇 *Ближайшее метро:* {nearest_metro} — {min_dist} м\n"
-            else:
-                response += "🚇 Метро не найдено.\n"
+        if 'школ' in text or 'все' in text:
+            if pois.get('schools'):
+                response += "\n📚 *Школы:*\n"
+                for s in pois['schools'][:3]:
+                    response += f"• {s['name']} — {s['distance']} м\n"
+                added = True
         
-        else:
-            # Общая информация
-            poi = find_nearby_pois_cached(lat, lon)
-            response += "*🏪 Ближайшая инфраструктура:*\n"
-            if poi.get('shops'):
-                response += f"• Магазин: {poi['shops'][0]['name']} — {poi['shops'][0]['distance']} м\n"
-            if poi.get('cafes'):
-                response += f"• Кафе: {poi['cafes'][0]['name']} — {poi['cafes'][0]['distance']} м\n"
-            if poi.get('parks'):
-                response += f"• Парк: {poi['parks'][0]['name']} — {poi['parks'][0]['distance']} м\n"
+        if 'сад' in text or 'детск' in text or 'все' in text:
+            if pois.get('kindergartens'):
+                response += "\n🏫 *Детские сады:*\n"
+                for k in pois['kindergartens'][:3]:
+                    response += f"• {k['name']} — {k['distance']} м\n"
+                added = True
+        
+        if 'аптек' in text or 'все' in text:
+            if pois.get('pharmacies'):
+                response += "\n💊 *Аптеки:*\n"
+                for ph in pois['pharmacies'][:3]:
+                    response += f"• {ph['name']} — {ph['distance']} м\n"
+                added = True
+        
+        if not added:
+            response += "📍 *Ближайшая инфраструктура:*\n"
+            if pois.get('shops'):
+                response += f"• Магазин: {pois['shops'][0]['name']} — {pois['shops'][0]['distance']} м\n"
+            if pois.get('cafes'):
+                response += f"• Кафе: {pois['cafes'][0]['name']} — {pois['cafes'][0]['distance']} м\n"
+            if pois.get('parks'):
+                response += f"• Парк: {pois['parks'][0]['name']} — {pois['parks'][0]['distance']} м\n"
+    else:
+        response += "📍 Координаты для поиска инфраструктуры отсутствуют.\n"
     
-    response += "\n💡 *Совет:* Можете уточнить вопрос или спросить о другом варианте."
-    
+    await thinking.delete()
     await update.message.reply_text(response, parse_mode="Markdown")
     
-    # Не выходим из режима вопросов, чтобы можно было задать еще вопрос
+    # Остаемся в режиме вопросов
     await update.message.reply_text(
-        "Остались вопросы? Спрашивайте! Или нажмите кнопку ниже, чтобы вернуться к вариантам.",
+        "💡 Еще вопросы? Спрашивайте!",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("◀️ Вернуться к вариантам", callback_data="back")
+            InlineKeyboardButton("◀️ К вариантам", callback_data="back")
         ]])
     )
 

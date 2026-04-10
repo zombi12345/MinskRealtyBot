@@ -13,29 +13,19 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from geopy.distance import distance
 from cachetools import TTLCache
 
-# ===== НАСТРОЙКИ =====
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "7227182736:AAHs6widEwBl6AJUebqaA_-z7x6XACi39BE"
 
-# Принудительно удаляем вебхук перед запуском
-async def reset_webhook():
-    bot = Bot(token=BOT_TOKEN)
-    await bot.delete_webhook(drop_pending_updates=True)
-    print("✅ Webhook удален")
-
-# Запускаем удаление вебхука
-asyncio.run(reset_webhook())
-
-# ===== API КЛЮЧИ =====
+# API КЛЮЧИ
 YANDEX_GEO_KEY = "ac332495-30ba-43ef-a119-e842e8fe23b2"
 ORS_API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImI0ZTcxNDQ2ZjU4ZjQwNDY5NDM4OTIyNGZjMjQzZWRmIiwiaCI6Im11cm11cjY0In0="
 
-# Кэш для API
+# Кэш
 api_cache = TTLCache(maxsize=500, ttl=86400)
 
-# ===== СЛОВАРЬ ДЛЯ ИСПРАВЛЕНИЯ ОПЕЧАТОК =====
+# СЛОВАРЬ ДЛЯ ИСПРАВЛЕНИЯ ОПЕЧАТОК
 CORRECTIONS = {
     'немега': 'Немига', 'нимига': 'Немига', 'немего': 'Немига',
     'купаловская': 'Купаловская', 'октябрьская': 'Октябрьская',
@@ -51,11 +41,10 @@ CORRECTIONS = {
     'аптека': 'аптека', 'аптеки': 'аптека',
     'кафе': 'кафе', 'кофейня': 'кафе', 'ресторан': 'кафе',
     'парк': 'парк', 'парки': 'парк', 'сквер': 'парк',
-    'магазин': 'магазин', 'магазины': 'магазин', 'супермаркет': 'магазин',
-    'тысяч': 'тысяч', 'тыс': 'тысяч', 'к': 'тысяч'
+    'магазин': 'магазин', 'магазины': 'магазин', 'супермаркет': 'магазин'
 }
 
-# ===== КООРДИНАТЫ =====
+# КООРДИНАТЫ
 METRO_STATIONS = {
     'Немига': (53.9065, 27.5550), 'Купаловская': (53.9075, 27.5620),
     'Октябрьская': (53.9000, 27.5600), 'Площадь Ленина': (53.8960, 27.5510),
@@ -82,7 +71,7 @@ DISTRICT_COORDS = {
     'Зеленый Луг': (53.9180, 27.5500), 'Красный Бор': (53.8880, 27.5250)
 }
 
-# ===== ЗАГРУЗКА ДАННЫХ =====
+# ЗАГРУЗКА ДАННЫХ
 current_dir = os.path.dirname(os.path.abspath(__file__))
 json_path = os.path.join(current_dir, 'flats_data.json')
 
@@ -190,7 +179,7 @@ def extract_user_needs(text):
         needs['rooms'] = 1
         needs['explanation'].append("🏠 1-комнатная")
     
-    # Цена - расширенный поиск
+    # Цена
     price = None
     patterns = [
         r'до\s*(\d{2,6})\s*(?:долларов|доллара|доллар|\$|\b)',
@@ -213,10 +202,7 @@ def extract_user_needs(text):
     
     if price:
         needs['max_price'] = price
-        if price >= 1000:
-            needs['explanation'].append(f"💰 до {price}$")
-        else:
-            needs['explanation'].append(f"💰 до {price*1000}$")
+        needs['explanation'].append(f"💰 до {price}$")
     
     # Этаж
     floor_match = re.search(r'(\d+)\s*этаж', text_corrected)
@@ -224,7 +210,7 @@ def extract_user_needs(text):
         needs['floor'] = int(floor_match.group(1))
         needs['explanation'].append(f"📌 на {needs['floor']} этаже")
     
-    # Станция метро
+    # Метро
     for station in METRO_STATIONS.keys():
         if station.lower() in text_corrected:
             needs['metro_station'] = station
@@ -441,8 +427,7 @@ async def start(update: Update, context):
         f"📖 *Как пользоваться:*\n\n"
         f"• Напишите, что ищете: `1 комнату до 50000$ рядом с Чижовкой и детским садом`\n"
         f"• Бот понимает опечатки и сокращения\n"
-        f"• Покажет, какие условия выполнены, а какие нет\n"
-        f"• Если точных совпадений нет — предложит лучшие альтернативы\n\n"
+        f"• Покажет, какие условия выполнены, а какие нет\n\n"
         f"📝 *Примеры:*\n"
         f"• `2 комнаты до 70000$`\n"
         f"• `Квартиру у метро Немига`\n"
@@ -465,20 +450,17 @@ async def search_flats(update: Update, context):
     
     needs = extract_user_needs(text)
     
-    # Оцениваем каждую квартиру
     scored = []
     for flat in FLATS:
         analysis = score_flat(flat, needs)
         scored.append((flat, analysis))
     
-    # Сортируем по проценту соответствия
     scored.sort(key=lambda x: x[1]['match_percent'], reverse=True)
     top = scored[:5]
     
     context.user_data['last_results'] = top
     context.user_data['last_needs'] = needs
     
-    # Формируем ответ
     if not top or top[0][1]['match_percent'] == 0:
         msg = "😔 *Ничего не найдено по вашему запросу.*\n\n"
         msg += "💡 *Попробуйте:*\n"
@@ -496,7 +478,6 @@ async def search_flats(update: Update, context):
             msg += f"{exp}\n"
         msg += f"\n{'─' * 40}\n\n"
     
-    # Если есть вариант с высоким совпадением
     if top[0][1]['match_percent'] >= 60:
         msg += f"✨ *Найдено {len(top)} отличных вариантов:*\n\n"
     elif top[0][1]['match_percent'] >= 30:
@@ -540,7 +521,7 @@ async def next_flats(update: Update, context):
     keyboard = [[InlineKeyboardButton("📋 Еще варианты", callback_data="next")]]
     await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
+# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER (В ОТДЕЛЬНОМ ПОТОКЕ) =====
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -557,20 +538,41 @@ def wakeup():
 
 def run_web():
     port = int(os.environ.get('PORT', 10000))
-    flask_app.run(host='0.0.0.0', port=port)
+    flask_app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
 
+# ЗАПУСКАЕМ ВЕБ-СЕРВЕР В ОТДЕЛЬНОМ ПОТОКЕ
 web_thread = Thread(target=run_web, daemon=True)
 web_thread.start()
 
-# ===== ЗАПУСК БОТА =====
+# ===== ЗАПУСК БОТА (С ПРАВИЛЬНЫМ EVENT LOOP) =====
 def main():
+    # Создаем новый event loop для основного потока
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(next_flats, pattern="next"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_flats))
     
     logger.info(f"✅ Бот запущен! В базе {len(FLATS)} квартир")
-    app.run_polling()
+    
+    # Запускаем polling в созданном event loop
+    loop.run_until_complete(app.initialize())
+    loop.run_until_complete(app.start())
+    loop.run_until_complete(app.updater.start_polling())
+    loop.run_forever()
 
 if __name__ == "__main__":
+    # Сначала удаляем вебхук (в отдельном event loop)
+    async def reset_webhook():
+        bot = Bot(token=BOT_TOKEN)
+        await bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Webhook удален")
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(reset_webhook())
+    
+    # Запускаем основного бота
     main()

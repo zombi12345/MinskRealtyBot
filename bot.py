@@ -9,7 +9,7 @@ from threading import Thread
 from datetime import datetime
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 from geopy.distance import distance
 from cachetools import TTLCache
 
@@ -17,6 +17,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "7227182736:AAHs6widEwBl6AJUebqaA_-z7x6XACi39BE"
+
+# Состояния для диалога
+ASKING_QUESTION = 1
 
 # API КЛЮЧИ
 YANDEX_GEO_KEY = "ac332495-30ba-43ef-a119-e842e8fe23b2"
@@ -59,26 +62,17 @@ METRO_STATIONS = {
     'Площадь Победы': (53.9100, 27.5750), 'Вокзальная': (53.8900, 27.5490)
 }
 
-# КООРДИНАТЫ РАЙОНОВ (ДОБАВЛЕНА ЧИЖОВКА)
+# КООРДИНАТЫ РАЙОНОВ
 DISTRICT_COORDS = {
-    'Чижовка': (53.8600, 27.5750),
-    'Чижовка-Арена': (53.8600, 27.5750),
-    'Лошица': (53.8650, 27.5650),
-    'Серебрянка': (53.8700, 27.5900),
-    'Уручье': (53.9460, 27.6910),
-    'Каменная горка': (53.8930, 27.4630),
-    'Кунцевщина': (53.8860, 27.4420),
-    'Сухарево': (53.8780, 27.4380),
-    'Малиновка': (53.8600, 27.5280),
-    'Грушевка': (53.8780, 27.5230),
-    'Петровщина': (53.8700, 27.5400),
-    'Михалово': (53.8550, 27.5200),
-    'Сосны': (53.8500, 27.6100),
-    'Шабаны': (53.8450, 27.6150),
-    'Ангарская': (53.8620, 27.6550),
-    'Восток': (53.9230, 27.6310),
-    'Веснянка': (53.9300, 27.6400),
-    'Зеленый Луг': (53.9180, 27.5500),
+    'Чижовка': (53.8600, 27.5750), 'Чижовка-Арена': (53.8600, 27.5750),
+    'Лошица': (53.8650, 27.5650), 'Серебрянка': (53.8700, 27.5900),
+    'Уручье': (53.9460, 27.6910), 'Каменная горка': (53.8930, 27.4630),
+    'Кунцевщина': (53.8860, 27.4420), 'Сухарево': (53.8780, 27.4380),
+    'Малиновка': (53.8600, 27.5280), 'Грушевка': (53.8780, 27.5230),
+    'Петровщина': (53.8700, 27.5400), 'Михалово': (53.8550, 27.5200),
+    'Сосны': (53.8500, 27.6100), 'Шабаны': (53.8450, 27.6150),
+    'Ангарская': (53.8620, 27.6550), 'Восток': (53.9230, 27.6310),
+    'Веснянка': (53.9300, 27.6400), 'Зеленый Луг': (53.9180, 27.5500),
     'Красный Бор': (53.8880, 27.5250)
 }
 
@@ -221,27 +215,19 @@ def extract_user_needs(text):
         needs['floor'] = int(floor_match.group(1))
         needs['explanation'].append(f"📌 на {needs['floor']} этаже")
     
-    # Метро
+    # Станция метро
     for station in METRO_STATIONS.keys():
         if station.lower() in text_corrected:
             needs['metro_station'] = station
             needs['explanation'].append(f"🚇 рядом с метро {station}")
             break
     
-    # Район - ВАЖНО! Проверяем все DISTRICT_COORDS
-    found_district = False
+    # Район
     for district in DISTRICT_COORDS.keys():
         if district.lower() in text_corrected:
             needs['district'] = district
             needs['explanation'].append(f"📍 в районе {district}")
-            found_district = True
             break
-    
-    # Если не нашли по точному названию, ищем по частям
-    if not found_district:
-        if 'чижовк' in text_corrected:
-            needs['district'] = 'Чижовка'
-            needs['explanation'].append(f"📍 в районе Чижовка")
     
     # Инфраструктура
     if 'детский сад' in text_corrected or 'садик' in text_corrected:
@@ -325,19 +311,17 @@ def score_flat(flat, needs):
     else:
         score += 15
     
-    # Район (15 баллов) - ВАЖНО!
+    # Район (15 баллов)
     max_score += 15
     if needs['district'] and lat and lon:
         district_coord = DISTRICT_COORDS.get(needs['district'])
         if district_coord:
             dist = calculate_distance_meters(lat, lon, district_coord[0], district_coord[1])
-            if dist < 2000:  # 2 км до района
+            if dist < 2000:
                 score += 15
                 matched_criteria.append(f"✅ рядом с {needs['district']}: {dist} м")
             else:
                 failed_criteria.append(f"❌ далеко от {needs['district']}: {dist} м")
-        else:
-            score += 15
     else:
         score += 15
     
@@ -425,7 +409,7 @@ def format_flat_response(flat, analysis, index, needs):
     msg = f"🏠 *Вариант {index}: {flat['rooms']}к, {flat['price_usd']}$*\n"
     msg += f"📍 {flat['address'][:50]}\n"
     msg += f"🏘 Район: {flat.get('district', 'Не указан')}\n"
-    msg += f"📊 *Совпадение: {analysis['match_percent']}%*\n\n"
+    msg += f"📊 *Совпадение с запросом: {analysis['match_percent']}%*\n\n"
     
     if analysis['matched']:
         msg += "*✅ Выполненные условия:*\n"
@@ -440,6 +424,55 @@ def format_flat_response(flat, analysis, index, needs):
     msg += f"\n🔗 [Смотреть на сайте]({flat['url']})"
     return msg
 
+def format_infrastructure_response(flat, poi):
+    """Форматирует ответ о инфраструктуре"""
+    msg = f"📊 *Инфраструктура вокруг квартиры:*\n\n"
+    msg += f"🏠 *{flat['rooms']}к, {flat['price_usd']}$*\n"
+    msg += f"📍 {flat['address'][:50]}\n\n"
+    
+    if poi.get('shops'):
+        msg += "🏪 *Магазины:*\n"
+        for s in poi['shops'][:3]:
+            msg += f"   • {s['name']} — {s['distance']} м\n"
+        msg += "\n"
+    
+    if poi.get('cafes'):
+        msg += "☕ *Кафе:*\n"
+        for c in poi['cafes'][:3]:
+            msg += f"   • {c['name']} — {c['distance']} м\n"
+        msg += "\n"
+    
+    if poi.get('kindergartens'):
+        msg += "🏫 *Детские сады:*\n"
+        for k in poi['kindergartens'][:3]:
+            msg += f"   • {k['name']} — {k['distance']} м\n"
+        msg += "\n"
+    
+    if poi.get('schools'):
+        msg += "📚 *Школы:*\n"
+        for s in poi['schools'][:3]:
+            msg += f"   • {s['name']} — {s['distance']} м\n"
+        msg += "\n"
+    
+    if poi.get('parks'):
+        msg += "🌳 *Парки:*\n"
+        for p in poi['parks'][:3]:
+            msg += f"   • {p['name']} — {p['distance']} м\n"
+        msg += "\n"
+    
+    if poi.get('pharmacies'):
+        msg += "💊 *Аптеки:*\n"
+        for ph in poi['pharmacies'][:3]:
+            msg += f"   • {ph['name']} — {ph['distance']} м\n"
+        msg += "\n"
+    
+    if poi.get('malls'):
+        msg += "🏬 *Торговые центры:*\n"
+        for m in poi['malls'][:3]:
+            msg += f"   • {m['name']} — {m['distance']} м\n"
+    
+    return msg
+
 # ===== ОБРАБОТЧИКИ TELEGRAM =====
 async def start(update: Update, context):
     await update.message.reply_text(
@@ -449,7 +482,11 @@ async def start(update: Update, context):
         f"• Просто напишите, что ищете, например:\n"
         f"  `1 комнату до 50000$ рядом с Чижовкой и ТЦ`\n"
         f"• Бот понимает опечатки и сокращения\n"
-        f"• Покажет, какие условия выполнены, а какие нет\n\n"
+        f"• Покажет, какие условия выполнены, а какие нет\n"
+        f"• *После результатов можно задать вопросы:*\n"
+        f"  - `Что рядом с первым вариантом?`\n"
+        f"  - `Какие магазины рядом со вторым?`\n"
+        f"  - `Есть ли детский сад рядом?`\n\n"
         f"📝 *Примеры запросов:*\n"
         f"• `2 комнаты до 70000$`\n"
         f"• `Квартиру у метро Немига`\n"
@@ -484,6 +521,8 @@ async def search_flats(update: Update, context):
     
     context.user_data['last_results'] = top
     context.user_data['last_needs'] = needs
+    context.user_data['last_query'] = text
+    context.user_data['results_shown'] = True
     
     if not top or top[0][1]['match_percent'] == 0:
         msg = "😔 *Ничего не найдено по вашему запросу.*\n\n"
@@ -517,7 +556,10 @@ async def search_flats(update: Update, context):
     if len(top) > 3:
         msg += f"_Показаны топ-3 из {len(top)}. Нажмите кнопку для просмотра следующих вариантов._"
     
-    keyboard = [[InlineKeyboardButton("📋 Следующие варианты", callback_data="next")]]
+    keyboard = [
+        [InlineKeyboardButton("📋 Следующие варианты", callback_data="next")],
+        [InlineKeyboardButton("❓ Задать вопрос о варианте", callback_data="ask")]
+    ]
     await thinking.edit_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def next_flats(update: Update, context):
@@ -535,6 +577,7 @@ async def next_flats(update: Update, context):
     start, end = idx, min(idx + 3, len(results))
     if start >= len(results):
         start, end = 0, 3
+        idx = 3
     
     msg = f"🔍 *Варианты {start+1}-{end} из {len(results)}:*\n\n"
     for i, (flat, analysis) in enumerate(results[start:end], start + 1):
@@ -542,8 +585,176 @@ async def next_flats(update: Update, context):
         msg += "\n\n" + "─" * 35 + "\n\n"
     
     context.user_data['idx'] = end
-    keyboard = [[InlineKeyboardButton("📋 Еще варианты", callback_data="next")]]
+    keyboard = [
+        [InlineKeyboardButton("📋 Еще варианты", callback_data="next")],
+        [InlineKeyboardButton("❓ Задать вопрос о варианте", callback_data="ask")]
+    ]
     await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def ask_question(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    context.user_data['waiting_for_question'] = True
+    context.user_data['question_mode'] = True
+    
+    await query.edit_message_text(
+        "💬 *Задайте вопрос о вариантах*\n\n"
+        "Например:\n"
+        "• *Что рядом с первым вариантом?*\n"
+        "• *Какие магазины рядом со вторым?*\n"
+        "• *Есть ли детский сад рядом?*\n"
+        "• *Как далеко до метро?*\n\n"
+        "Просто напишите вопрос в чат!",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ Вернуться к вариантам", callback_data="back_to_results")
+        ]])
+    )
+
+async def back_to_results(update: Update, context):
+    query = update.callback_query
+    await query.answer()
+    
+    results = context.user_data.get('last_results', [])
+    needs = context.user_data.get('last_needs', {})
+    
+    if not results:
+        await query.edit_message_text("Нет результатов. Напишите новый запрос.")
+        return
+    
+    msg = f"🔍 *Варианты 1-{min(3, len(results))} из {len(results)}:*\n\n"
+    for i, (flat, analysis) in enumerate(results[:3], 1):
+        msg += format_flat_response(flat, analysis, i, needs)
+        msg += "\n\n" + "─" * 35 + "\n\n"
+    
+    keyboard = [
+        [InlineKeyboardButton("📋 Следующие варианты", callback_data="next")],
+        [InlineKeyboardButton("❓ Задать вопрос о варианте", callback_data="ask")]
+    ]
+    await query.edit_message_text(msg, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(keyboard))
+    context.user_data['waiting_for_question'] = False
+    context.user_data['question_mode'] = False
+
+async def handle_question(update: Update, context):
+    if not context.user_data.get('waiting_for_question'):
+        await search_flats(update, context)
+        return
+    
+    text = update.message.text.lower()
+    results = context.user_data.get('last_results', [])
+    
+    if not results:
+        await update.message.reply_text("Сначала выполните поиск квартир.")
+        context.user_data['waiting_for_question'] = False
+        return
+    
+    # Определяем номер варианта
+    flat_index = 0
+    if 'перв' in text or '1' in text:
+        flat_index = 0
+    elif 'втор' in text or '2' in text:
+        flat_index = 1 if len(results) > 1 else 0
+    elif 'треть' in text or '3' in text:
+        flat_index = 2 if len(results) > 2 else 0
+    
+    flat, analysis = results[flat_index]
+    lat, lon = analysis.get('lat'), analysis.get('lon')
+    
+    thinking = await update.message.reply_text("🔍 *Ищу информацию...*", parse_mode="Markdown")
+    
+    response = f"📊 *Информация о варианте {flat_index + 1}:*\n\n"
+    response += f"🏠 *{flat['rooms']}к, {flat['price_usd']}$*\n"
+    response += f"📍 {flat['address']}\n"
+    response += f"🏘 Район: {flat.get('district', 'Не указан')}\n\n"
+    
+    if lat and lon:
+        poi = get_osm_pois(lat, lon)
+        
+        if 'все' in text or 'рядом' in text or 'инфраструктур' in text:
+            response += format_infrastructure_response(flat, poi)
+        
+        elif 'магазин' in text or 'тц' in text:
+            if poi.get('malls'):
+                response += "🏬 *Торговые центры:*\n"
+                for m in poi['malls'][:3]:
+                    response += f"• {m['name']} — {m['distance']} м\n"
+            elif poi.get('shops'):
+                response += "🏪 *Магазины:*\n"
+                for s in poi['shops'][:3]:
+                    response += f"• {s['name']} — {s['distance']} м\n"
+            else:
+                response += "🏪 Магазины и ТЦ не найдены в радиусе 1 км"
+        
+        elif 'кафе' in text:
+            if poi.get('cafes'):
+                response += "☕ *Кафе:*\n"
+                for c in poi['cafes'][:3]:
+                    response += f"• {c['name']} — {c['distance']} м\n"
+            else:
+                response += "☕ Кафе не найдены в радиусе 1 км"
+        
+        elif 'детск' in text or 'сад' in text:
+            if poi.get('kindergartens'):
+                response += "🏫 *Детские сады:*\n"
+                for k in poi['kindergartens'][:3]:
+                    response += f"• {k['name']} — {k['distance']} м\n"
+            else:
+                response += "🏫 Детские сады не найдены в радиусе 1 км"
+        
+        elif 'школ' in text:
+            if poi.get('schools'):
+                response += "📚 *Школы:*\n"
+                for s in poi['schools'][:3]:
+                    response += f"• {s['name']} — {s['distance']} м\n"
+            else:
+                response += "📚 Школы не найдены в радиусе 1 км"
+        
+        elif 'парк' in text:
+            if poi.get('parks'):
+                response += "🌳 *Парки:*\n"
+                for p in poi['parks'][:3]:
+                    response += f"• {p['name']} — {p['distance']} м\n"
+            else:
+                response += "🌳 Парки не найдены в радиусе 1 км"
+        
+        elif 'аптек' in text:
+            if poi.get('pharmacies'):
+                response += "💊 *Аптеки:*\n"
+                for ph in poi['pharmacies'][:3]:
+                    response += f"• {ph['name']} — {ph['distance']} м\n"
+            else:
+                response += "💊 Аптеки не найдены в радиусе 1 км"
+        
+        elif 'метро' in text:
+            # Ищем ближайшее метро
+            min_dist = 999999
+            nearest = None
+            for station, coord in METRO_STATIONS.items():
+                dist = calculate_distance_meters(lat, lon, coord[0], coord[1])
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest = station
+            if nearest:
+                response += f"🚇 *Ближайшее метро:* {nearest} — {min_dist} м"
+            else:
+                response += "🚇 Метро не найдено"
+        
+        else:
+            response += format_infrastructure_response(flat, poi)
+    
+    else:
+        response += "📍 Координаты для поиска инфраструктуры отсутствуют."
+    
+    await thinking.delete()
+    await update.message.reply_text(response, parse_mode="Markdown")
+    
+    await update.message.reply_text(
+        "💡 Еще вопросы? Спрашивайте!",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ Вернуться к вариантам", callback_data="back_to_results")
+        ]])
+    )
 
 # ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
 flask_app = Flask(__name__)
@@ -573,9 +784,12 @@ def main():
     asyncio.set_event_loop(loop)
     
     app = Application.builder().token(BOT_TOKEN).build()
+    
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(next_flats, pattern="next"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_flats))
+    app.add_handler(CallbackQueryHandler(ask_question, pattern="ask"))
+    app.add_handler(CallbackQueryHandler(back_to_results, pattern="back_to_results"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_question))
     
     logger.info(f"✅ Бот запущен! В базе {len(FLATS)} квартир")
     

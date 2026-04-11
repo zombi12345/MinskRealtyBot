@@ -1,13 +1,11 @@
 import os
-import sys
-import signal
-import time
 import json
 import re
 import logging
 import asyncio
 import requests
 import math
+import difflib
 from threading import Thread
 from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, Bot
@@ -22,7 +20,16 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "7227182736:AAHs6widEwBl6AJUebqaA_-z7x6XACi39BE"
 OPENAI_API_KEY = "sk-Bylz2io6oa46zyduebiq3It5xncjfPgqGhiujd4JaCg7GSvg"
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+# Проверка ключа OpenAI (просто логируем, но не блокируем)
+try:
+    openai_client = OpenAI(api_key=OPENAI_API_KEY)
+    # Тестовый запрос к API (можно закомментировать, если не нужно)
+    # openai_client.models.list()
+    logger.info("OpenAI client initialized successfully")
+except Exception as e:
+    logger.error(f"OpenAI initialization error: {e}")
+    openai_client = None
+
 api_cache = TTLCache(maxsize=500, ttl=86400)
 
 # Координаты метро и районов
@@ -126,8 +133,10 @@ def check_poi_nearby(lat, lon, poi_type, max_distance=1000):
             return True, nearest
     return False, None
 
-# ========== ИЗВЛЕЧЕНИЕ ПАРАМЕТРОВ ЧЕРЕЗ LLM ==========
+# ========== ИЗВЛЕЧЕНИЕ ПАРАМЕТРОВ ЧЕРЕЗ LLM (С ОБРАБОТКОЙ ОШИБОК) ==========
 def extract_needs_with_llm(user_text):
+    if not openai_client:
+        return None
     prompt = f"""
 Ты — помощник по поиску квартир в Минске. Извлеки из запроса пользователя следующие параметры (только если они явно упомянуты):
 - количество комнат (1, 2, 3)
@@ -154,7 +163,8 @@ def extract_needs_with_llm(user_text):
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=250
+            max_tokens=250,
+            timeout=10
         )
         content = response.choices[0].message.content.strip()
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
@@ -168,6 +178,81 @@ def extract_needs_with_llm(user_text):
     except Exception as e:
         logger.error(f"LLM parsing error: {e}")
         return None
+
+# ========== РЕЗЕРВНЫЙ ПАРСЕР С ИСПРАВЛЕНИЕМ ОПЕЧАТОК ==========
+def fallback_extract_needs(text):
+    text_lower = text.lower()
+    needs = {
+        'rooms': None,
+        'max_price': None,
+        'floor': None,
+        'metro_station': None,
+        'district': None,
+        'infrastructure': []
+    }
+    # Комнаты
+    if '3-комнатн' in text_lower or 'трёхкомнатн' in text_lower or '3 комнаты' in text_lower:
+        needs['rooms'] = 3
+    elif '2-комнатн' in text_lower or 'двухкомнатн' in text_lower or '2 комнаты' in text_lower:
+        needs['rooms'] = 2
+    elif '1-комнатн' in text_lower or 'однокомнатн' in text_lower or '1 комнату' in text_lower:
+        needs['rooms'] = 1
+    # Цена
+    price_match = re.search(r'до\s*(\d{4,6})', text_lower)
+    if price_match:
+        needs['max_price'] = int(price_match.group(1))
+    # Этаж
+    floor_match = re.search(r'(\d+)\s*этаж', text_lower)
+    if floor_match:
+        needs['floor'] = int(floor_match.group(1))
+    # Метро (с исправлением опечаток)
+    metro_list = list(METRO_STATIONS.keys())
+    for station in metro_list:
+        if station.lower() in text_lower:
+            needs['metro_station'] = station
+            break
+    else:
+        words = text_lower.split()
+        for word in words:
+            matches = difflib.get_close_matches(word, [s.lower() for s in metro_list], n=1, cutoff=0.7)
+            if matches:
+                for orig in metro_list:
+                    if orig.lower() == matches[0]:
+                        needs['metro_station'] = orig
+                        break
+                if needs['metro_station']:
+                    break
+    # Район (с исправлением опечаток)
+    district_list = list(DISTRICT_COORDS.keys())
+    for district in district_list:
+        if district.lower() in text_lower:
+            needs['district'] = district
+            break
+    else:
+        words = text_lower.split()
+        for word in words:
+            matches = difflib.get_close_matches(word, [d.lower() for d in district_list], n=1, cutoff=0.7)
+            if matches:
+                for orig in district_list:
+                    if orig.lower() == matches[0]:
+                        needs['district'] = orig
+                        break
+                if needs['district']:
+                    break
+    # Инфраструктура
+    infra_keywords = {
+        'школ': 'школа', 'школы': 'школа',
+        'детский сад': 'детский сад', 'садик': 'детский сад', 'сад': 'детский сад',
+        'тц': 'ТЦ', 'торговый центр': 'ТЦ', 'молл': 'ТЦ',
+        'магазин': 'магазин', 'супермаркет': 'магазин',
+        'кафе': 'кафе', 'кофейня': 'кафе',
+        'парк': 'парк', 'сквер': 'парк',
+        'аптека': 'аптека'
+    }
+    for word, infra_type in infra_keywords.items():
+        if word in text_lower:
+            needs['infrastructure'].append(infra_type)
+    return needs
 
 # ========== ОЦЕНКА КВАРТИРЫ ==========
 def score_flat(flat, needs):
@@ -305,11 +390,17 @@ async def start(update: Update, context):
 async def search_flats(update: Update, context):
     text = update.message.text
     await update.message.chat.send_action(action="typing")
-    thinking = await update.message.reply_text("🤔 *Анализирую запрос с помощью ИИ...*", parse_mode="Markdown")
+    thinking = await update.message.reply_text("🤔 *Анализирую запрос...*", parse_mode="Markdown")
 
+    # Пробуем OpenAI, если не работает - fallback
     needs = extract_needs_with_llm(text)
     if not needs:
-        await thinking.edit_text("⚠️ *Не удалось распознать запрос. Пожалуйста, переформулируйте.*", parse_mode="Markdown")
+        needs = fallback_extract_needs(text)
+        logger.info("Used fallback parser")
+
+    # Если после всех попыток ничего не извлечено
+    if not needs.get('rooms') and not needs.get('max_price') and not needs.get('metro_station') and not needs.get('district') and not needs.get('infrastructure'):
+        await thinking.edit_text("⚠️ *Не удалось распознать запрос. Пожалуйста, переформулируйте.*\n\nПример: `1 комнату до 50000$ рядом с Чижовкой`", parse_mode="Markdown")
         return
 
     scored = [(flat, score_flat(flat, needs)) for flat in FLATS]

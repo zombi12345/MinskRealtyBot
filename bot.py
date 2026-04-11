@@ -4,7 +4,6 @@ import re
 import logging
 import asyncio
 import requests
-import math
 import difflib
 from threading import Thread
 from flask import Flask
@@ -14,25 +13,23 @@ from geopy.distance import distance
 from cachetools import TTLCache
 from openai import OpenAI
 
+# ========== НАСТРОЙКИ ==========
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = "7227182736:AAHs6widEwBl6AJUebqaA_-z7x6XACi39BE"
 OPENAI_API_KEY = "sk-Bylz2io6oa46zyduebiq3It5xncjfPgqGhiujd4JaCg7GSvg"
 
-# Проверка ключа OpenAI (просто логируем, но не блокируем)
 try:
     openai_client = OpenAI(api_key=OPENAI_API_KEY)
-    # Тестовый запрос к API (можно закомментировать, если не нужно)
-    # openai_client.models.list()
-    logger.info("OpenAI client initialized successfully")
+    logger.info("OpenAI client initialized")
 except Exception as e:
-    logger.error(f"OpenAI initialization error: {e}")
+    logger.error(f"OpenAI init error: {e}")
     openai_client = None
 
 api_cache = TTLCache(maxsize=500, ttl=86400)
 
-# Координаты метро и районов
+# ========== КООРДИНАТЫ ==========
 METRO_STATIONS = {
     'Немига': (53.9065, 27.5550), 'Купаловская': (53.9075, 27.5620),
     'Октябрьская': (53.9000, 27.5600), 'Площадь Ленина': (53.8960, 27.5510),
@@ -47,9 +44,9 @@ METRO_STATIONS = {
 }
 
 DISTRICT_COORDS = {
-    'Чижовка': (53.8600, 27.5750), 'Лошица': (53.8650, 27.5650),
-    'Серебрянка': (53.8700, 27.5900), 'Уручье': (53.9460, 27.6910),
-    'Каменная горка': (53.8930, 27.4630), 'Кунцевщина': (53.8860, 27.4420),
+    'Каменная горка': (53.8930, 27.4630), 'Чижовка': (53.8600, 27.5750),
+    'Лошица': (53.8650, 27.5650), 'Серебрянка': (53.8700, 27.5900),
+    'Уручье': (53.9460, 27.6910), 'Кунцевщина': (53.8860, 27.4420),
     'Сухарево': (53.8780, 27.4380), 'Малиновка': (53.8600, 27.5280),
     'Грушевка': (53.8780, 27.5230), 'Петровщина': (53.8700, 27.5400),
     'Михалово': (53.8550, 27.5200), 'Сосны': (53.8500, 27.6100),
@@ -58,7 +55,7 @@ DISTRICT_COORDS = {
     'Зеленый Луг': (53.9180, 27.5500), 'Красный Бор': (53.8880, 27.5250)
 }
 
-# Загрузка квартир
+# ========== ЗАГРУЗКА КВАРТИР ==========
 current_dir = os.path.dirname(os.path.abspath(__file__))
 json_path = os.path.join(current_dir, 'flats_data.json')
 try:
@@ -80,7 +77,7 @@ def get_osm_pois(lat, lon, radius=1000):
     if cache_key in api_cache:
         return api_cache[cache_key]
     query = f"""
-    [out:json][timeout:15];
+    [out:json][timeout:12];
     (
       node["shop"~"supermarket|convenience|mall"](around:{radius},{lat},{lon});
       node["amenity"~"kindergarten|school|pharmacy|cafe|restaurant"](around:{radius},{lat},{lon});
@@ -89,7 +86,7 @@ def get_osm_pois(lat, lon, radius=1000):
     out body;
     """
     try:
-        r = requests.post("https://overpass-api.de/api/interpreter", data=query, timeout=15)
+        r = requests.post("https://overpass-api.de/api/interpreter", data=query, timeout=12)
         if r.status_code == 200:
             result = parse_osm_response(r.json(), lat, lon)
             api_cache[cache_key] = result
@@ -133,27 +130,29 @@ def check_poi_nearby(lat, lon, poi_type, max_distance=1000):
             return True, nearest
     return False, None
 
-# ========== ИЗВЛЕЧЕНИЕ ПАРАМЕТРОВ ЧЕРЕЗ LLM (С ОБРАБОТКОЙ ОШИБОК) ==========
-def extract_needs_with_llm(user_text):
-    if not openai_client:
-        return None
+# ========== ПАРСИНГ ЗАПРОСА ЧЕРЕЗ OPENAI ==========
+def parse_query_with_openai(user_text):
     prompt = f"""
-Ты — помощник по поиску квартир в Минске. Извлеки из запроса пользователя следующие параметры (только если они явно упомянуты):
-- количество комнат (1, 2, 3)
-- максимальная цена в долларах США (число)
-- желаемый этаж (число)
-- станция метро (название, например "Немига", "Спортивная", "Каменная горка")
-- район или микрорайон (например "Чижовка", "Уручье")
-- объекты инфраструктуры, которые должны быть рядом: детский сад, школа, ТЦ (торговый центр), магазин, кафе, парк, аптека
+Ты — помощник по поиску квартир в Минске. Извлеки из запроса пользователя следующие параметры (только если они явно упомянуты). Верни ТОЛЬКО JSON-объект без лишнего текста.
 
-Верни ТОЛЬКО JSON-объект в точном формате:
+Возможные значения:
+- rooms: целое число 1, 2 или 3
+- max_price: целое число (цена в долларах США)
+- floor: целое число (этаж)
+- metro_station: строка (название станции метро из списка: Немига, Купаловская, Октябрьская, Площадь Ленина, Институт культуры, Грушевка, Малиновка, Каменная горка, Спортивная, Пушкинская, Партизанская, Автозаводская, Могилевская, Уручье, Восток, Московская, Парк Челюскинцев, Академия наук, Площадь Победы, Вокзальная)
+- district: строка (название района: Каменная горка, Чижовка, Лошица, Серебрянка, Уручье, Кунцевщина, Сухарево, Малиновка, Грушевка, Петровщина, Михалово, Сосны, Шабаны, Ангарская, Восток, Веснянка, Зеленый Луг, Красный Бор)
+- infrastructure: массив строк, возможные значения: "детский сад", "школа", "ТЦ", "магазин", "кафе", "парк", "аптека"
+
+Если параметр не упомянут, ставь null. Для инфраструктуры — пустой массив.
+
+Формат ответа (пример):
 {{
-  "rooms": null,
-  "max_price": null,
+  "rooms": 1,
+  "max_price": 50000,
   "floor": null,
   "metro_station": null,
-  "district": null,
-  "infrastructure": []
+  "district": "Каменная горка",
+  "infrastructure": ["школа"]
 }}
 
 Запрос пользователя: "{user_text}"
@@ -163,7 +162,7 @@ def extract_needs_with_llm(user_text):
             model="gpt-3.5-turbo",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
-            max_tokens=250,
+            max_tokens=300,
             timeout=10
         )
         content = response.choices[0].message.content.strip()
@@ -174,15 +173,20 @@ def extract_needs_with_llm(user_text):
             data = json.loads(content)
         if 'infrastructure' not in data:
             data['infrastructure'] = []
+        # Нормализация
+        if data.get('district'):
+            data['district'] = data['district'].strip()
+        if data.get('metro_station'):
+            data['metro_station'] = data['metro_station'].strip()
         return data
     except Exception as e:
-        logger.error(f"LLM parsing error: {e}")
+        logger.error(f"OpenAI parse error: {e}")
         return None
 
-# ========== РЕЗЕРВНЫЙ ПАРСЕР С ИСПРАВЛЕНИЕМ ОПЕЧАТОК ==========
-def fallback_extract_needs(text):
-    text_lower = text.lower()
-    needs = {
+# ========== РЕЗЕРВНЫЙ ПАРСЕР (С ИСПРАВЛЕНИЕМ ОПЕЧАТОК) ==========
+def fallback_parse_query(user_text):
+    text_lower = user_text.lower()
+    query = {
         'rooms': None,
         'max_price': None,
         'floor': None,
@@ -192,52 +196,52 @@ def fallback_extract_needs(text):
     }
     # Комнаты
     if '3-комнатн' in text_lower or 'трёхкомнатн' in text_lower or '3 комнаты' in text_lower:
-        needs['rooms'] = 3
+        query['rooms'] = 3
     elif '2-комнатн' in text_lower or 'двухкомнатн' in text_lower or '2 комнаты' in text_lower:
-        needs['rooms'] = 2
+        query['rooms'] = 2
     elif '1-комнатн' in text_lower or 'однокомнатн' in text_lower or '1 комнату' in text_lower:
-        needs['rooms'] = 1
+        query['rooms'] = 1
     # Цена
     price_match = re.search(r'до\s*(\d{4,6})', text_lower)
     if price_match:
-        needs['max_price'] = int(price_match.group(1))
+        query['max_price'] = int(price_match.group(1))
     # Этаж
     floor_match = re.search(r'(\d+)\s*этаж', text_lower)
     if floor_match:
-        needs['floor'] = int(floor_match.group(1))
+        query['floor'] = int(floor_match.group(1))
     # Метро (с исправлением опечаток)
-    metro_list = list(METRO_STATIONS.keys())
-    for station in metro_list:
+    metro_names = list(METRO_STATIONS.keys())
+    for station in metro_names:
         if station.lower() in text_lower:
-            needs['metro_station'] = station
+            query['metro_station'] = station
             break
     else:
         words = text_lower.split()
         for word in words:
-            matches = difflib.get_close_matches(word, [s.lower() for s in metro_list], n=1, cutoff=0.7)
+            matches = difflib.get_close_matches(word, [s.lower() for s in metro_names], n=1, cutoff=0.7)
             if matches:
-                for orig in metro_list:
+                for orig in metro_names:
                     if orig.lower() == matches[0]:
-                        needs['metro_station'] = orig
+                        query['metro_station'] = orig
                         break
-                if needs['metro_station']:
+                if query['metro_station']:
                     break
     # Район (с исправлением опечаток)
-    district_list = list(DISTRICT_COORDS.keys())
-    for district in district_list:
+    district_names = list(DISTRICT_COORDS.keys())
+    for district in district_names:
         if district.lower() in text_lower:
-            needs['district'] = district
+            query['district'] = district
             break
     else:
         words = text_lower.split()
         for word in words:
-            matches = difflib.get_close_matches(word, [d.lower() for d in district_list], n=1, cutoff=0.7)
+            matches = difflib.get_close_matches(word, [d.lower() for d in district_names], n=1, cutoff=0.7)
             if matches:
-                for orig in district_list:
+                for orig in district_names:
                     if orig.lower() == matches[0]:
-                        needs['district'] = orig
+                        query['district'] = orig
                         break
-                if needs['district']:
+                if query['district']:
                     break
     # Инфраструктура
     infra_keywords = {
@@ -249,78 +253,88 @@ def fallback_extract_needs(text):
         'парк': 'парк', 'сквер': 'парк',
         'аптека': 'аптека'
     }
-    for word, infra_type in infra_keywords.items():
+    for word, infra in infra_keywords.items():
         if word in text_lower:
-            needs['infrastructure'].append(infra_type)
-    return needs
+            query['infrastructure'].append(infra)
+    query['infrastructure'] = list(set(query['infrastructure']))
+    return query
 
 # ========== ОЦЕНКА КВАРТИРЫ ==========
-def score_flat(flat, needs):
+def score_flat(flat, query):
     lat, lon = flat.get('lat'), flat.get('lon')
     score = 0
     max_score = 0
     matched = []
     failed = []
+    details = {}
 
-    max_score += 15
-    if needs.get('rooms') is not None:
-        if flat['rooms'] == needs['rooms']:
-            score += 15
+    # 1. Комнаты (20 баллов)
+    max_score += 20
+    if query.get('rooms') is not None:
+        if flat['rooms'] == query['rooms']:
+            score += 20
             matched.append(f"✅ {flat['rooms']}-комнатная")
         else:
-            failed.append(f"❌ {flat['rooms']}-комнатная (запрошена {needs['rooms']})")
+            failed.append(f"❌ {flat['rooms']}-комнатная (запрошена {query['rooms']})")
     else:
-        score += 15
+        score += 20
         matched.append(f"ℹ️ {flat['rooms']}-комнатная")
 
-    max_score += 15
-    if needs.get('max_price') is not None:
-        if flat['price_usd'] <= needs['max_price']:
-            score += 15
-            matched.append(f"✅ {flat['price_usd']}$ (бюджет {needs['max_price']}$)")
+    # 2. Цена (20 баллов)
+    max_score += 20
+    if query.get('max_price') is not None:
+        if flat['price_usd'] <= query['max_price']:
+            score += 20
+            matched.append(f"✅ {flat['price_usd']}$ (бюджет {query['max_price']}$)")
         else:
-            failed.append(f"❌ {flat['price_usd']}$ (бюджет {needs['max_price']}$)")
+            failed.append(f"❌ {flat['price_usd']}$ (бюджет {query['max_price']}$)")
     else:
-        score += 15
+        score += 20
         matched.append(f"ℹ️ {flat['price_usd']}$")
 
+    # 3. Этаж (10 баллов)
     max_score += 10
-    if needs.get('floor') is not None:
+    if query.get('floor') is not None:
         flat_floor = flat.get('floor')
-        if flat_floor and flat_floor == needs['floor']:
+        if flat_floor and flat_floor == query['floor']:
             score += 10
             matched.append(f"✅ Этаж {flat_floor}")
         elif flat_floor:
-            failed.append(f"❌ Этаж {flat_floor} (запрошен {needs['floor']})")
+            failed.append(f"❌ Этаж {flat_floor} (запрошен {query['floor']})")
     else:
         score += 10
 
+    # 4. Метро (15 баллов)
     max_score += 15
-    if needs.get('metro_station') and lat and lon:
-        station = METRO_STATIONS.get(needs['metro_station'])
+    if query.get('metro_station') and lat and lon:
+        station = METRO_STATIONS.get(query['metro_station'])
         if station:
             dist = calculate_distance_meters(lat, lon, station[0], station[1])
+            details['metro_distance'] = dist
             if dist < 1500:
                 score += 15
-                matched.append(f"✅ метро {needs['metro_station']}: {dist} м")
+                matched.append(f"✅ метро {query['metro_station']}: {dist} м")
             else:
-                failed.append(f"❌ метро {needs['metro_station']}: {dist} м")
+                failed.append(f"❌ метро {query['metro_station']}: {dist} м")
     else:
         score += 15
 
+    # 5. Район (15 баллов)
     max_score += 15
-    if needs.get('district') and lat and lon:
-        district_coord = DISTRICT_COORDS.get(needs['district'])
+    if query.get('district') and lat and lon:
+        district_coord = DISTRICT_COORDS.get(query['district'])
         if district_coord:
             dist = calculate_distance_meters(lat, lon, district_coord[0], district_coord[1])
+            details['district_distance'] = dist
             if dist < 2000:
                 score += 15
-                matched.append(f"✅ рядом с {needs['district']}: {dist} м")
+                matched.append(f"✅ рядом с {query['district']}: {dist} м")
             else:
-                failed.append(f"❌ далеко от {needs['district']}: {dist} м")
+                failed.append(f"❌ далеко от {query['district']}: {dist} м")
     else:
         score += 15
 
+    # 6. Инфраструктура (каждый пункт 5 баллов, макс 20)
     infra_map = {
         'детский сад': 'kindergartens',
         'школа': 'schools',
@@ -330,16 +344,19 @@ def score_flat(flat, needs):
         'парк': 'parks',
         'аптека': 'pharmacies'
     }
-    for req in needs.get('infrastructure', []):
+    infra_score = 0
+    infra_max = 20
+    for req in query.get('infrastructure', [])[:4]:
         max_score += 5
         poi_type = infra_map.get(req)
         if poi_type:
             has, info = check_poi_nearby(lat, lon, poi_type)
             if has:
-                score += 5
+                infra_score += 5
                 matched.append(f"✅ {req.capitalize()}: {info['distance']} м")
             else:
                 failed.append(f"❌ {req.capitalize()} не найдено в радиусе 1 км")
+    score += infra_score
 
     percent = int((score / max_score) * 100) if max_score > 0 else 0
     return {
@@ -347,13 +364,18 @@ def score_flat(flat, needs):
         'matched': matched,
         'failed': failed,
         'lat': lat,
-        'lon': lon
+        'lon': lon,
+        'details': details
     }
 
 def format_flat_response(flat, analysis, index):
     msg = f"🏠 *Вариант {index}: {flat['rooms']}к, {flat['price_usd']}$*\n"
     msg += f"📍 {flat['address'][:50]}\n"
     msg += f"🏘 Район: {flat.get('district', 'Не указан')}\n"
+    if 'district_distance' in analysis.get('details', {}):
+        msg += f"📏 Расстояние до района: {analysis['details']['district_distance']} м\n"
+    if 'metro_distance' in analysis.get('details', {}):
+        msg += f"🚇 Расстояние до метро: {analysis['details']['metro_distance']} м\n"
     msg += f"📊 *Совпадение: {analysis['match_percent']}%*\n\n"
     if analysis['matched']:
         msg += "*✅ Выполненные условия:*\n"
@@ -368,10 +390,22 @@ def format_flat_response(flat, analysis, index):
 
 def format_infrastructure_response(flat, poi):
     msg = f"📊 *Инфраструктура вокруг квартиры:*\n\n🏠 *{flat['rooms']}к, {flat['price_usd']}$*\n📍 {flat['address'][:50]}\n\n"
-    for key, emoji in [('shops','🏪'), ('cafes','☕'), ('kindergartens','🏫'), ('schools','📚'), ('parks','🌳'), ('pharmacies','💊'), ('malls','🏬')]:
+    sections = [
+        ('shops', '🏪 Магазины'),
+        ('cafes', '☕ Кафе'),
+        ('kindergartens', '🏫 Детские сады'),
+        ('schools', '📚 Школы'),
+        ('parks', '🌳 Парки'),
+        ('pharmacies', '💊 Аптеки'),
+        ('malls', '🏬 Торговые центры')
+    ]
+    for key, title in sections:
         if poi.get(key):
-            msg += f"{emoji} *{key.capitalize()}:*\n" + "\n".join([f"   • {p['name']} — {p['distance']} м" for p in poi[key][:3]]) + "\n\n"
-    return msg
+            msg += f"{title}:\n"
+            for item in poi[key][:3]:
+                msg += f"   • {item['name']} — {item['distance']} м\n"
+            msg += "\n"
+    return msg if len(msg) > 100 else "Инфраструктура в радиусе 1 км не найдена."
 
 # ========== ОБРАБОТЧИКИ TELEGRAM ==========
 async def start(update: Update, context):
@@ -380,35 +414,38 @@ async def start(update: Update, context):
         f"📊 *В базе:* {len(FLATS)} квартир\n\n"
         "🧠 *Я использую искусственный интеллект, чтобы точно понимать ваши запросы.*\n\n"
         "📝 *Примеры:*\n"
-        "• `1 комнату до 50000$ рядом с Чижовкой и ТЦ`\n"
+        "• `Найди 1 комнату до 50000$ рядом с Каменной горкой и школой`\n"
         "• `Квартиру рядом со станцией Спортивная и аптекой`\n"
         "• `2 комнаты до 70000$ у метро Немига с детским садом`\n\n"
-        "После результатов можно задавать уточняющие вопросы: `Что рядом с первым вариантом?`",
+        "После результатов можно задавать уточняющие вопросы: `Что рядом с первым вариантом?`, `Как далеко Каменная горка от первого варианта?`",
         parse_mode="Markdown"
     )
 
 async def search_flats(update: Update, context):
     text = update.message.text
     await update.message.chat.send_action(action="typing")
-    thinking = await update.message.reply_text("🤔 *Анализирую запрос...*", parse_mode="Markdown")
+    thinking = await update.message.reply_text("🤔 *Анализирую запрос с помощью ИИ...*", parse_mode="Markdown")
 
-    # Пробуем OpenAI, если не работает - fallback
-    needs = extract_needs_with_llm(text)
-    if not needs:
-        needs = fallback_extract_needs(text)
+    query = parse_query_with_openai(text)
+    if not query:
+        query = fallback_parse_query(text)
         logger.info("Used fallback parser")
 
-    # Если после всех попыток ничего не извлечено
-    if not needs.get('rooms') and not needs.get('max_price') and not needs.get('metro_station') and not needs.get('district') and not needs.get('infrastructure'):
-        await thinking.edit_text("⚠️ *Не удалось распознать запрос. Пожалуйста, переформулируйте.*\n\nПример: `1 комнату до 50000$ рядом с Чижовкой`", parse_mode="Markdown")
+    if not query.get('rooms') and not query.get('max_price') and not query.get('metro_station') and not query.get('district') and not query.get('infrastructure'):
+        await thinking.edit_text("⚠️ *Не удалось распознать запрос. Пожалуйста, переформулируйте.*\n\nПример: `1 комнату до 50000$ рядом с Каменной горкой`", parse_mode="Markdown")
         return
 
-    scored = [(flat, score_flat(flat, needs)) for flat in FLATS]
-    scored.sort(key=lambda x: x[1]['match_percent'], reverse=True)
-    top = scored[:5]
+    scored = [(flat, score_flat(flat, query)) for flat in FLATS]
+    if query.get('district'):
+        scored.sort(key=lambda x: ( -x[1]['match_percent'], x[1].get('details', {}).get('district_distance', 999999) ))
+    elif query.get('metro_station'):
+        scored.sort(key=lambda x: ( -x[1]['match_percent'], x[1].get('details', {}).get('metro_distance', 999999) ))
+    else:
+        scored.sort(key=lambda x: -x[1]['match_percent'])
 
+    top = scored[:5]
     context.user_data['last_results'] = top
-    context.user_data['last_needs'] = needs
+    context.user_data['last_query'] = query
     context.user_data['idx'] = 3
 
     if not top or top[0][1]['match_percent'] == 0:
@@ -416,12 +453,12 @@ async def search_flats(update: Update, context):
         return
 
     msg = "🔍 *Результаты поиска*\n\n📋 *Как я понял запрос:*\n"
-    if needs.get('rooms'): msg += f"🏠 {needs['rooms']}-комнатная\n"
-    if needs.get('max_price'): msg += f"💰 до {needs['max_price']}$\n"
-    if needs.get('floor'): msg += f"📌 на {needs['floor']} этаже\n"
-    if needs.get('metro_station'): msg += f"🚇 рядом с метро {needs['metro_station']}\n"
-    if needs.get('district'): msg += f"📍 в районе {needs['district']}\n"
-    for infra in needs.get('infrastructure', []):
+    if query.get('rooms'): msg += f"🏠 {query['rooms']}-комнатная\n"
+    if query.get('max_price'): msg += f"💰 до {query['max_price']}$\n"
+    if query.get('floor'): msg += f"📌 на {query['floor']} этаже\n"
+    if query.get('metro_station'): msg += f"🚇 рядом с метро {query['metro_station']}\n"
+    if query.get('district'): msg += f"📍 в районе {query['district']}\n"
+    for infra in query.get('infrastructure', []):
         msg += f"🏪 {infra}\n"
     msg += "\n" + "─" * 40 + "\n\n"
 
@@ -463,7 +500,7 @@ async def ask_question(update: Update, context):
     await query.answer()
     context.user_data['waiting_for_question'] = True
     await query.edit_message_text(
-        "💬 *Задайте вопрос о вариантах*\n\nНапример:\n• Что рядом с первым вариантом?\n• Какие магазины рядом со вторым?\n• Есть ли детский сад рядом?\n\nПросто напишите вопрос в чат!",
+        "💬 *Задайте вопрос о вариантах*\n\nНапример:\n• Что рядом с первым вариантом?\n• Какие магазины рядом со вторым?\n• Как далеко Каменная горка от первого варианта?\n\nПросто напишите вопрос в чат!",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Вернуться к вариантам", callback_data="back")]])
     )
@@ -472,7 +509,6 @@ async def back_to_results(update: Update, context):
     query = update.callback_query
     await query.answer()
     results = context.user_data.get('last_results', [])
-    needs = context.user_data.get('last_needs', {})
     if not results:
         await query.edit_message_text("Нет результатов.")
         return
@@ -490,6 +526,7 @@ async def handle_question(update: Update, context):
     if not context.user_data.get('waiting_for_question'):
         await search_flats(update, context)
         return
+
     text = update.message.text.lower()
     results = context.user_data.get('last_results', [])
     if not results:
@@ -506,8 +543,33 @@ async def handle_question(update: Update, context):
         idx = 2 if len(results) > 2 else 0
     flat, analysis = results[idx]
     lat, lon = analysis.get('lat'), analysis.get('lon')
-    thinking = await update.message.reply_text("🔍 *Ищу информацию...*", parse_mode="Markdown")
 
+    # Расстояние до района
+    for district in DISTRICT_COORDS.keys():
+        if district.lower() in text and ('далеко' in text or 'расстоян' in text or 'сколько' in text or 'далек' in text):
+            if lat and lon:
+                dist = calculate_distance_meters(lat, lon, DISTRICT_COORDS[district][0], DISTRICT_COORDS[district][1])
+                response = f"📍 *Расстояние от квартиры до района {district}:* {dist} м"
+                await update.message.reply_text(response, parse_mode="Markdown")
+                return
+            else:
+                await update.message.reply_text("Координаты квартиры отсутствуют.")
+                return
+
+    # Расстояние до метро
+    for station in METRO_STATIONS.keys():
+        if station.lower() in text and ('далеко' in text or 'расстоян' in text or 'сколько' in text or 'далек' in text):
+            if lat and lon:
+                dist = calculate_distance_meters(lat, lon, METRO_STATIONS[station][0], METRO_STATIONS[station][1])
+                response = f"🚇 *Расстояние от квартиры до метро {station}:* {dist} м"
+                await update.message.reply_text(response, parse_mode="Markdown")
+                return
+            else:
+                await update.message.reply_text("Координаты квартиры отсутствуют.")
+                return
+
+    # Общая инфраструктура
+    thinking = await update.message.reply_text("🔍 *Ищу информацию...*", parse_mode="Markdown")
     response = f"📊 *Информация о варианте {idx+1}:*\n\n"
     response += f"🏠 *{flat['rooms']}к, {flat['price_usd']}$*\n📍 {flat['address']}\n\n"
     if lat and lon:

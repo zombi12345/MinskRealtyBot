@@ -1,7 +1,6 @@
 import os
 import sys
 import signal
-import subprocess
 import time
 import json
 import re
@@ -16,24 +15,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQu
 from geopy.distance import distance
 from cachetools import TTLCache
 from openai import OpenAI
-
-# ========== УБИВАЕМ СТАРЫЕ ПРОЦЕССЫ БОТА ==========
-def kill_old_bots():
-    try:
-        current_pid = os.getpid()
-        result = subprocess.run(['pgrep', '-f', 'python.*bot.py'], capture_output=True, text=True)
-        for pid_str in result.stdout.strip().split():
-            if pid_str:
-                pid = int(pid_str)
-                if pid != current_pid:
-                    print(f"🔪 Убиваем старый процесс бота {pid}")
-                    os.kill(pid, signal.SIGTERM)
-                    time.sleep(0.5)
-    except Exception as e:
-        print(f"⚠️ Ошибка при убийстве старых процессов: {e}")
-
-kill_old_bots()
-# =================================================
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -483,12 +464,14 @@ def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(reset_webhook())
+
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(next_flats, pattern="next"))
     app.add_handler(CallbackQueryHandler(ask_question, pattern="ask"))
     app.add_handler(CallbackQueryHandler(back_to_results, pattern="back"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_question))
+
     logger.info("✅ Бот запущен")
     loop.run_until_complete(app.initialize())
     loop.run_until_complete(app.start())

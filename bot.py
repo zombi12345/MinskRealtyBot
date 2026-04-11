@@ -1,4 +1,8 @@
 import os
+import sys
+import signal
+import subprocess
+import time
 import json
 import re
 import logging
@@ -13,7 +17,24 @@ from geopy.distance import distance
 from cachetools import TTLCache
 from openai import OpenAI
 
-# ========== НАСТРОЙКИ ==========
+# ========== УБИВАЕМ СТАРЫЕ ПРОЦЕССЫ БОТА ==========
+def kill_old_bots():
+    try:
+        current_pid = os.getpid()
+        result = subprocess.run(['pgrep', '-f', 'python.*bot.py'], capture_output=True, text=True)
+        for pid_str in result.stdout.strip().split():
+            if pid_str:
+                pid = int(pid_str)
+                if pid != current_pid:
+                    print(f"🔪 Убиваем старый процесс бота {pid}")
+                    os.kill(pid, signal.SIGTERM)
+                    time.sleep(0.5)
+    except Exception as e:
+        print(f"⚠️ Ошибка при убийстве старых процессов: {e}")
+
+kill_old_bots()
+# =================================================
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -21,9 +42,9 @@ BOT_TOKEN = "7227182736:AAHs6widEwBl6AJUebqaA_-z7x6XACi39BE"
 OPENAI_API_KEY = "sk-Bylz2io6oa46zyduebiq3It5xncjfPgqGhiujd4JaCg7GSvg"
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
-api_cache = TTLCache(maxsize=500, ttl=86400)          # кэш на 24 часа
+api_cache = TTLCache(maxsize=500, ttl=86400)
 
-# ========== КООРДИНАТЫ МЕТРО И РАЙОНОВ ==========
+# Координаты метро и районов
 METRO_STATIONS = {
     'Немига': (53.9065, 27.5550), 'Купаловская': (53.9075, 27.5620),
     'Октябрьская': (53.9000, 27.5600), 'Площадь Ленина': (53.8960, 27.5510),
@@ -49,7 +70,7 @@ DISTRICT_COORDS = {
     'Зеленый Луг': (53.9180, 27.5500), 'Красный Бор': (53.8880, 27.5250)
 }
 
-# ========== ЗАГРУЗКА ДАННЫХ О КВАРТИРАХ ==========
+# Загрузка квартир
 current_dir = os.path.dirname(os.path.abspath(__file__))
 json_path = os.path.join(current_dir, 'flats_data.json')
 try:
@@ -60,7 +81,7 @@ except Exception as e:
     logger.error(f"❌ Ошибка загрузки: {e}")
     FLATS = []
 
-# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (POI, РАССТОЯНИЯ) ==========
+# ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def calculate_distance_meters(lat1, lon1, lat2, lon2):
     if not all([lat1, lon1, lat2, lon2]):
         return 999999
@@ -124,7 +145,7 @@ def check_poi_nearby(lat, lon, poi_type, max_distance=1000):
             return True, nearest
     return False, None
 
-# ========== ИЗВЛЕЧЕНИЕ ПАРАМЕТРОВ ЧЕРЕЗ OPENAI ==========
+# ========== ИЗВЛЕЧЕНИЕ ПАРАМЕТРОВ ЧЕРЕЗ LLM ==========
 def extract_needs_with_llm(user_text):
     prompt = f"""
 Ты — помощник по поиску квартир в Минске. Извлеки из запроса пользователя следующие параметры (только если они явно упомянуты):
@@ -155,7 +176,6 @@ def extract_needs_with_llm(user_text):
             max_tokens=250
         )
         content = response.choices[0].message.content.strip()
-        # Извлекаем JSON из ответа (на случай лишнего текста)
         json_match = re.search(r'\{.*\}', content, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group())
@@ -176,7 +196,6 @@ def score_flat(flat, needs):
     matched = []
     failed = []
 
-    # Комнаты (15 баллов)
     max_score += 15
     if needs.get('rooms') is not None:
         if flat['rooms'] == needs['rooms']:
@@ -188,7 +207,6 @@ def score_flat(flat, needs):
         score += 15
         matched.append(f"ℹ️ {flat['rooms']}-комнатная")
 
-    # Цена (15 баллов)
     max_score += 15
     if needs.get('max_price') is not None:
         if flat['price_usd'] <= needs['max_price']:
@@ -200,7 +218,6 @@ def score_flat(flat, needs):
         score += 15
         matched.append(f"ℹ️ {flat['price_usd']}$")
 
-    # Этаж (10 баллов)
     max_score += 10
     if needs.get('floor') is not None:
         flat_floor = flat.get('floor')
@@ -212,7 +229,6 @@ def score_flat(flat, needs):
     else:
         score += 10
 
-    # Метро (15 баллов)
     max_score += 15
     if needs.get('metro_station') and lat and lon:
         station = METRO_STATIONS.get(needs['metro_station'])
@@ -226,7 +242,6 @@ def score_flat(flat, needs):
     else:
         score += 15
 
-    # Район (15 баллов)
     max_score += 15
     if needs.get('district') and lat and lon:
         district_coord = DISTRICT_COORDS.get(needs['district'])
@@ -240,7 +255,6 @@ def score_flat(flat, needs):
     else:
         score += 15
 
-    # Инфраструктура (каждый пункт 5 баллов)
     infra_map = {
         'детский сад': 'kindergartens',
         'школа': 'schools',
@@ -274,7 +288,7 @@ def format_flat_response(flat, analysis, index):
     msg = f"🏠 *Вариант {index}: {flat['rooms']}к, {flat['price_usd']}$*\n"
     msg += f"📍 {flat['address'][:50]}\n"
     msg += f"🏘 Район: {flat.get('district', 'Не указан')}\n"
-    msg += f"📊 *Совпадение с запросом: {analysis['match_percent']}%*\n\n"
+    msg += f"📊 *Совпадение: {analysis['match_percent']}%*\n\n"
     if analysis['matched']:
         msg += "*✅ Выполненные условия:*\n"
         for m in analysis['matched'][:6]:
@@ -283,41 +297,27 @@ def format_flat_response(flat, analysis, index):
         msg += "\n*❌ Невыполненные условия:*\n"
         for f in analysis['failed'][:4]:
             msg += f"{f}\n"
-    msg += f"\n🔗 [Смотреть на сайте]({flat['url']})"
+    msg += f"\n🔗 [Смотреть]({flat['url']})"
     return msg
 
 def format_infrastructure_response(flat, poi):
-    msg = f"📊 *Инфраструктура вокруг квартиры:*\n\n"
-    msg += f"🏠 *{flat['rooms']}к, {flat['price_usd']}$*\n"
-    msg += f"📍 {flat['address'][:50]}\n\n"
-    sections = [
-        ('shops', '🏪 Магазины'),
-        ('cafes', '☕ Кафе'),
-        ('kindergartens', '🏫 Детские сады'),
-        ('schools', '📚 Школы'),
-        ('parks', '🌳 Парки'),
-        ('pharmacies', '💊 Аптеки'),
-        ('malls', '🏬 Торговые центры')
-    ]
-    for key, title in sections:
+    msg = f"📊 *Инфраструктура вокруг квартиры:*\n\n🏠 *{flat['rooms']}к, {flat['price_usd']}$*\n📍 {flat['address'][:50]}\n\n"
+    for key, emoji in [('shops','🏪'), ('cafes','☕'), ('kindergartens','🏫'), ('schools','📚'), ('parks','🌳'), ('pharmacies','💊'), ('malls','🏬')]:
         if poi.get(key):
-            msg += f"{title}:\n"
-            for item in poi[key][:3]:
-                msg += f"   • {item['name']} — {item['distance']} м\n"
-            msg += "\n"
-    return msg if len(msg) > 100 else "Инфраструктура в радиусе 1 км не найдена."
+            msg += f"{emoji} *{key.capitalize()}:*\n" + "\n".join([f"   • {p['name']} — {p['distance']} м" for p in poi[key][:3]]) + "\n\n"
+    return msg
 
 # ========== ОБРАБОТЧИКИ TELEGRAM ==========
 async def start(update: Update, context):
     await update.message.reply_text(
-        f"🏠 *Добро пожаловать в ИИ-консультанта «Твоя Столица»!*\n\n"
+        "🏠 *Добро пожаловать в ИИ-консультанта «Твоя Столица»!*\n\n"
         f"📊 *В базе:* {len(FLATS)} квартир\n\n"
-        f"🧠 *Я использую искусственный интеллект, чтобы точно понимать ваши запросы.*\n\n"
-        f"📝 *Примеры:*\n"
-        f"• `1 комнату до 50000$ рядом с Чижовкой и ТЦ`\n"
-        f"• `Квартиру рядом со станцией Спортивная и аптекой`\n"
-        f"• `2 комнаты до 70000$ у метро Немига с детским садом`\n\n"
-        f"После результатов можно задавать уточняющие вопросы: `Что рядом с первым вариантом?`",
+        "🧠 *Я использую искусственный интеллект, чтобы точно понимать ваши запросы.*\n\n"
+        "📝 *Примеры:*\n"
+        "• `1 комнату до 50000$ рядом с Чижовкой и ТЦ`\n"
+        "• `Квартиру рядом со станцией Спортивная и аптекой`\n"
+        "• `2 комнаты до 70000$ у метро Немига с детским садом`\n\n"
+        "После результатов можно задавать уточняющие вопросы: `Что рядом с первым вариантом?`",
         parse_mode="Markdown"
     )
 
@@ -451,7 +451,7 @@ async def handle_question(update: Update, context):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Вернуться к вариантам", callback_data="back")]])
     )
 
-# ========== ВЕБ-СЕРВЕР ДЛЯ RENDER (ЧТОБЫ НЕ ЗАСЫПАЛ) ==========
+# ========== ВЕБ-СЕРВЕР ДЛЯ RENDER ==========
 flask_app = Flask(__name__)
 
 @flask_app.route('/')
@@ -473,7 +473,7 @@ def run_web():
 web_thread = Thread(target=run_web, daemon=True)
 web_thread.start()
 
-# ========== ЗАПУСК БОТА С ПРАВИЛЬНЫМ EVENT LOOP ==========
+# ========== ЗАПУСК БОТА ==========
 async def reset_webhook():
     bot = Bot(token=BOT_TOKEN)
     await bot.delete_webhook(drop_pending_updates=True)
@@ -483,14 +483,12 @@ def main():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(reset_webhook())
-
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(next_flats, pattern="next"))
     app.add_handler(CallbackQueryHandler(ask_question, pattern="ask"))
     app.add_handler(CallbackQueryHandler(back_to_results, pattern="back"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_question))
-
     logger.info("✅ Бот запущен")
     loop.run_until_complete(app.initialize())
     loop.run_until_complete(app.start())
